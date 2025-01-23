@@ -16,8 +16,8 @@ import numpy as np
 
 def compute_scale_and_shift(prediction, target, mask):
     mask = mask > 0
-    pred = prediction[mask]
-    t = target[mask]
+    pred = prediction[mask].astype(np.float64)
+    t = target[mask].astype(np.float64)
 
     a_00 = np.sum(pred * pred)
     a_01 = np.sum(pred)
@@ -48,7 +48,7 @@ class ScaleShiftAnalyzer:
         return scale, shift
 
     def align(self, prediction, scale, shift):
-        return prediction * scale + shift
+        return (prediction * scale + shift).astype(prediction.dtype)
 
     def plot_scale_and_shift(self):
 

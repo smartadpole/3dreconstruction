@@ -40,7 +40,8 @@ def compute_errors(gt, pred, mask=None):
     gt = gt + 1e-12
     pred = pred + 1e-12
     if mask is not None:
-        pred[~mask] = gt[~mask]
+        pred = pred[mask]
+        gt = gt[mask]
 
     abs_diff = np.mean(np.abs(gt - pred))
     abs_rel = np.mean(np.abs(gt - pred) / gt)
@@ -60,11 +61,8 @@ def normalize(image):
     return image
 
 def visualize_image(rgb, gt, pred, mask, name="result"):
-    scale = 1/ 255.0  * 100 * 0.25
-    gt = (gt * scale).astype(np.uint16)
-    pred = (pred * scale).astype(np.uint16)
-    gt[~mask] = gt[mask].max()
-    pred[~mask] = pred[mask].max()
+    gt[gt > 1000] = gt[mask].max()
+    pred[pred > 1000] = pred[mask].max()
 
     # 可视化原始图像、处理后的 mask 图像和差异图像
     import matplotlib
@@ -79,10 +77,12 @@ def visualize_image(rgb, gt, pred, mask, name="result"):
 
     axes[0, 0].imshow(rgb, cmap=None)
     axes[0, 0].set_title('original image')
-    diff = np.abs(gt - pred)
+    diff = np.abs(gt.astype(np.float16) - pred.astype(np.float16)).astype(np.uint64)
+    mask &= gt < 1000
     diff[~mask] = 0
+    diff_rel = diff / gt
     axes[1, 0].imshow(diff, cmap=cmap)
-    axes[1, 0].set_title(f'Difference {np.sum(diff)}')
+    axes[1, 0].set_title(f'Difference {np.mean(diff[mask]):.2f} / DiffRel {np.mean(diff_rel[mask]):.2f}')
 
 
     axes[0, 1].imshow(gt, cmap=cmap)
@@ -128,6 +128,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show):
         recall += pred_missing_ratio
 
         scale, shift = icp2d.compute_scale_and_shift(pred, gt, mask)
+        # scale, shift = 0.009, 16.727
         pred_aligned = icp2d.align(pred, scale, shift)
         # pred_aligned = pred
 
@@ -140,6 +141,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show):
         count += 1
 
         if show:
+            print(errs)
             name = '/'.join(gt_path.split('/')[-3:])
             rgb = load_image(rgb_path) if rgb_path is not None else np.zeros_like(gt)
             visualize_image(rgb, gt, pred_aligned, mask, name)
@@ -155,6 +157,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show):
             'a1': a1_avg, 'a2': a2_avg, 'a3': a3_avg,
             'recall': recall}
 
+    icp2d.plot_scale_and_shift()
     print("Errors:")
     for key, value in errs.items():
         print(f"  {key}: {value:.6f}")
