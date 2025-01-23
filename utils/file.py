@@ -71,13 +71,19 @@ def GetImages(path):
 
 def match_images(paths:list):
     lists = [ReadImageList(path) for path in paths]
-    common_files = set(os.path.relpath(file, start=os.path.commonpath(lists[0])) for file in lists[0])
 
-    for file_list in lists[1:]:
-        common_files.intersection_update(os.path.relpath(file, start=os.path.commonpath(file_list)) for file in file_list)
+    for i, files in enumerate(lists):
+        files = [f[len((paths[i]).rstrip('/'))+1:] for f in files]
+        common_files = set(files)
 
+    common_files = list(common_files)
+    try:
+        common_files.sort(key=lambda x:int(re.findall('\d+', os.path.splitext(os.path.basename(x))[0])[0]))
+    except:
+        common_files.sort()
+    common_files = list(common_files)
     matched_lists = []
-    for file_list in lists:
-        matched_lists.append([file for file in file_list if os.path.relpath(file, start=os.path.commonpath(file_list)) in common_files])
+    for root in paths:
+        matched_lists.append([os.path.join(root, file) for file in common_files])
 
     return matched_lists

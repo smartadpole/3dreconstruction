@@ -29,7 +29,7 @@ def GetArgs():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--gt", type=str, required=True, help="Directory containing ground truth depth maps")
     parser.add_argument("--pred", type=str, required=True, help="Directory containing predicted depth maps")
-    parser.add_argument("--rgb", type=str, required=True, help="Directory containing rgb image")
+    parser.add_argument("--rgb", type=str, help="Directory containing rgb image")
     parser.add_argument("--show", action="store_true", help="show result")
 
     args = parser.parse_args()
@@ -60,8 +60,11 @@ def normalize(image):
     return image
 
 def visualize_image(rgb, gt, pred, mask, name="result"):
-    gt = (gt / 255.0).astype(np.int8)
-    pred = (pred / 255.0).astype(np.int8)
+    scale = 1/ 255.0  * 100 * 0.25
+    gt = (gt * scale).astype(np.uint16)
+    pred = (pred * scale).astype(np.uint16)
+    gt[~mask] = gt[mask].max()
+    pred[~mask] = pred[mask].max()
 
     # 可视化原始图像、处理后的 mask 图像和差异图像
     import matplotlib
@@ -73,26 +76,33 @@ def visualize_image(rgb, gt, pred, mask, name="result"):
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle(name)
-    axes[0, 0].imshow(gt, cmap=cmap)
-    axes[0, 0].set_title('Ground Truth')
-    axes[1, 0].imshow(pred, cmap=cmap)
-    axes[1, 0].set_title('Predicted Aligned')
+
+    axes[0, 0].imshow(rgb, cmap=None)
+    axes[0, 0].set_title('original image')
     diff = np.abs(gt - pred)
     diff[~mask] = 0
-    axes[0, 2].imshow(diff, cmap=cmap)
-    axes[0, 2].set_title(f'Difference {np.sum(diff)}')
+    axes[1, 0].imshow(diff, cmap=cmap)
+    axes[1, 0].set_title(f'Difference {np.sum(diff)}')
 
-    axes[0, 1].imshow(np.where(mask, gt, np.nan), cmap=cmap)
-    axes[0, 1].set_title('Ground Truth - Masked')
-    axes[1, 1].imshow(np.where(mask, pred, np.nan), cmap=cmap)
-    axes[1, 1].set_title('Predicted Aligned - Masked')
-    axes[1, 2].imshow(rgb, cmap=None)
-    axes[1, 2].set_title('original image')
+
+    axes[0, 1].imshow(gt, cmap=cmap)
+    axes[0, 1].set_title('Ground Truth')
+    axes[1, 1].imshow(pred, cmap=cmap)
+    axes[1, 1].set_title('Predicted Aligned')
+
+    axes[0, 2].imshow(np.where(mask, gt, np.nan), cmap=cmap)
+    axes[0, 2].set_title('Ground Truth - Masked')
+    axes[1, 2].imshow(np.where(mask, pred, np.nan), cmap=cmap)
+    axes[1, 2].set_title('Predicted Aligned - Masked')
 
     plt.show()
 
-def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir):
-    gt_images, pred_images, rgb_images = match_images([ground_truth_dir, predicted_dir, rgb_dir])
+def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show):
+    if not rgb_dir:
+        gt_images, pred_images = match_images([ground_truth_dir, predicted_dir])
+        rgb_images = [None] * len(gt_images)
+    else:
+        gt_images, pred_images, rgb_images = match_images([ground_truth_dir, predicted_dir, rgb_dir])
 
     abs_diff_total = 0
     abs_rel_total = 0
@@ -108,7 +118,9 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir):
         gt = load_image(gt_path)
         pred = load_image(pred_path)
 
-        mask_gt = (gt > MIN) & (gt < MAX)
+        # to cm
+        gt = (gt / 255.0  * 100 * 0.25).astype(np.uint16)
+        mask_gt = (gt > MIN) & (gt < 1000) # 10 meters
         mask_pred = (pred > MIN) & (pred < MAX)
         mask = mask_gt & mask_pred
 
@@ -127,10 +139,10 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir):
         a3_total += errs[4]
         count += 1
 
-        name = '/'.join(gt_path.split('/')[-3:])
-        rgb = load_image(rgb_path)
-        visualize_image(rgb, gt, pred_aligned, mask, name)
-
+        if show:
+            name = '/'.join(gt_path.split('/')[-3:])
+            rgb = load_image(rgb_path) if rgb_path is not None else np.zeros_like(gt)
+            visualize_image(rgb, gt, pred_aligned, mask, name)
 
     abs_diff_avg = abs_diff_total / count
     abs_rel_avg = abs_rel_total / count
@@ -150,7 +162,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir):
 
 def main():
     args = GetArgs()
-    evaluate_depth_maps(args.gt, args.pred, args.rgb)
+    evaluate_depth_maps(args.gt, args.pred, args.rgb, args.show)
 
 
 if __name__ == '__main__':
