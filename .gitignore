@@ -1,0 +1,11 @@
+__pycache__/
+/build/
+/sc_depth_pl.egg-info/
+.idea/
+ckpts
+result
+log.txt
+*loc_train.txt
+*log*.txt
+*result*
+*.onnx
