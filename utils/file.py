@@ -16,7 +16,7 @@ FILE_SUFFIX = ['jpg', 'png', 'jpeg', 'bmp', 'tiff']
 
 
 def Walk(path, suffix:tuple):
-    file_list = [os.path.join(dp, f) for dp, dn, filenames in os.walk(path) for f in filenames if f.endswith(suffix)]
+    file_list = [os.path.join(dp, f) for dp, dn, filenames in os.walk(path, followlinks=True) for f in filenames if f.endswith(suffix)]
 
     try:
         file_list.sort(key=lambda x:int(re.findall('\d+', os.path.splitext(os.path.basename(x))[0])[0]))

@@ -20,6 +20,7 @@ from tqdm import tqdm
 import numpy as np
 from utils.file import match_images
 from PointClould.ICP2D import ScaleShiftAnalyzer
+from utils.file import MkdirSimple
 
 MIN = 0.0001
 MAX = 65535.0 - 1
@@ -148,6 +149,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         if save_dir:
             # todo: hao 2025-01-24 00:12 - how to process the max value/max invalid region
             save_path = os.path.join(save_dir, pred_path[len(predicted_dir.rstrip('/'))+1:])
+            MkdirSimple(save_path)
             cv2.imwrite(save_path, pred_aligned)
 
     abs_diff_avg = abs_diff_total / count
