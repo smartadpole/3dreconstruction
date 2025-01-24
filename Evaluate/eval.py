@@ -24,7 +24,8 @@ from utils.file import MkdirSimple
 
 MIN = 0.0001
 MAX = 65535.0 - 1
-MAX_DISTANCE = 500.0
+MAX_DISTANCE4Eval = 500.0
+MAX_DISTANCE4Save = 700.0
 
 def GetArgs():
     parser = argparse.ArgumentParser(description="Depth Estimation Evaluation Tool",
@@ -63,8 +64,8 @@ def normalize(image):
     return image
 
 def visualize_image(rgb, gt, pred, mask, name="result"):
-    gt[gt > MAX_DISTANCE] = gt[mask].max()
-    pred[pred > MAX_DISTANCE] = pred[mask].max()
+    gt[gt > MAX_DISTANCE4Eval] = gt[mask].max()
+    pred[pred > MAX_DISTANCE4Eval] = pred[mask].max()
 
     # 可视化原始图像、处理后的 mask 图像和差异图像
     import matplotlib
@@ -80,7 +81,7 @@ def visualize_image(rgb, gt, pred, mask, name="result"):
     axes[0, 0].imshow(rgb, cmap=None)
     axes[0, 0].set_title('original image')
     diff = np.abs(gt.astype(np.float16) - pred.astype(np.float16)).astype(np.uint64)
-    mask &= gt < MAX_DISTANCE
+    mask &= gt < MAX_DISTANCE4Eval
     diff[~mask] = 0
     diff_rel = diff / gt
     axes[1, 0].imshow(diff, cmap=cmap)
@@ -122,7 +123,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
 
         # to cm
         gt = (gt / 255.0  * 100 * 0.25).astype(np.uint16)
-        mask_gt = (gt > MIN) & (gt < MAX_DISTANCE) # 10 meters
+        mask_gt = (gt > MIN) & (gt < MAX_DISTANCE4Eval) # 10 meters
         mask_pred = (pred > MIN) & (pred < MAX)
         mask = mask_gt & mask_pred
 
@@ -151,6 +152,13 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             # pred_aligned[mask_gt] = gt[mask_gt]
             save_path = os.path.join(save_dir, pred_path[len(predicted_dir.rstrip('/'))+1:])
             MkdirSimple(save_path)
+            pred = pred.astype(np.float32)
+            pred_aligned = icp2d.align(pred, scale, shift)
+            mask_invalid = pred > MAX
+            pred_aligned = np.clip(pred_aligned, 0, MAX_DISTANCE4Save)
+            pred_aligned = pred_aligned / MAX_DISTANCE4Save * 65535.0
+            pred_aligned = pred_aligned.astype("uint16")
+            pred_aligned[mask_invalid] = 65535
             cv2.imwrite(save_path, pred_aligned)
 
     abs_diff_avg = abs_diff_total / count
