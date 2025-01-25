@@ -24,7 +24,6 @@ from utils.file import MkdirSimple
 
 MIN = 0.0001
 MAX = 65535.0 - 1
-MAX_DISTANCE4Eval = 500.0  # 5 meters
 MAX_DISTANCE4Save = 700.0
 
 def GetArgs():
@@ -35,6 +34,7 @@ def GetArgs():
     parser.add_argument("--rgb", type=str, help="Directory containing rgb image")
     parser.add_argument("--show", action="store_true", help="Show result")
     parser.add_argument("--save", type=str, help="Directory to save aligned depth maps")
+    parser.add_argument("--max_dist", type=int, default=500, help="max distance for evaluation (cm)")
 
     args = parser.parse_args()
     return args
@@ -63,9 +63,10 @@ def normalize(image):
     image = image.astype("uint8")
     return image
 
-def visualize_image(rgb, gt, pred, mask, name="result"):
-    gt[gt > MAX_DISTANCE4Eval] = gt[mask].max()
-    pred[pred > MAX_DISTANCE4Eval] = pred[mask].max()
+def visualize_image(rgb, gt, pred, min_invalid, name="result"):
+    mask = (gt > MIN) & (gt < min_invalid)
+    gt[gt >= min_invalid] = min_invalid
+    pred[pred >= min_invalid] = min_invalid
 
     # 可视化原始图像、处理后的 mask 图像和差异图像
     import matplotlib
@@ -81,7 +82,6 @@ def visualize_image(rgb, gt, pred, mask, name="result"):
     axes[0, 0].imshow(rgb, cmap=None)
     axes[0, 0].set_title('original image')
     diff = np.abs(gt.astype(np.float16) - pred.astype(np.float16)).astype(np.uint64)
-    mask &= gt < MAX_DISTANCE4Eval
     diff[~mask] = 0
     diff_rel = diff / gt
     axes[1, 0].imshow(diff, cmap=cmap)
@@ -100,7 +100,7 @@ def visualize_image(rgb, gt, pred, mask, name="result"):
 
     plt.show()
 
-def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir):
+def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir, MAX_DISTANCE4Eval):
     if not rgb_dir:
         gt_images, pred_images = match_images([ground_truth_dir, predicted_dir])
         rgb_images = [None] * len(gt_images)
@@ -130,7 +130,10 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         pred_missing_ratio = np.sum(mask) / np.sum(mask_gt)
         recall += pred_missing_ratio
 
-        gt = gt * 10
+        gt = gt * 10.0
+        gt[gt > 65535] = 65535
+        gt = gt.astype(np.uint16)
+
         scale, shift = icp2d.compute_scale_and_shift(pred, gt, mask)
         pred_aligned = icp2d.align(pred, scale, shift)
 
@@ -146,7 +149,8 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             print(errs)
             name = '/'.join(gt_path.split('/')[-3:])
             rgb = load_image(rgb_path) if rgb_path is not None else np.zeros_like(gt)
-            visualize_image(rgb, gt, pred_aligned, mask, name)
+            min_invalide = gt[gt_cm >= MAX_DISTANCE4Eval].min()
+            visualize_image(rgb, gt, pred_aligned, min_invalide, name)
 
         if save_dir:
             # todo: hao 2025-01-24 00:12 - how to process the max value/max invalid region
@@ -157,12 +161,12 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             mask_invalid = pred <= MIN
             pred = pred.astype(np.float32)
             pred_aligned = icp2d.align(pred, scale, shift)
-            pred_aligned = pred_aligned.astype("uint16")
             mask_invalid = mask_invalid | (pred_aligned <= MIN)
             max_value = pred_aligned[mask_max].max() if mask_max.any() else 65535
             max_value = min(max_value, 65535)
             pred_aligned[pred_aligned >= max_value] = max_value
             pred_aligned[mask_invalid] = 0
+            pred_aligned = pred_aligned.astype("uint16")
             cv2.imwrite(save_path, pred_aligned)
 
     abs_diff_avg = abs_diff_total / count
@@ -183,7 +187,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
 
 def main():
     args = GetArgs()
-    evaluate_depth_maps(args.gt, args.pred, args.rgb, args.show, args.save)
+    evaluate_depth_maps(args.gt, args.pred, args.rgb, args.show, args.save, args.max_dist)
 
 
 if __name__ == '__main__':
