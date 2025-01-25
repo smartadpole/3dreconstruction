@@ -48,10 +48,11 @@ def compute_errors(gt, pred, mask=None):
 
     abs_diff = np.mean(np.abs(gt - pred))
     abs_rel = np.mean(np.abs(gt - pred) / gt)
+    a0 = np.mean((np.maximum(gt / pred, pred / gt) < 1.1).astype(np.float32))
     a1 = np.mean((np.maximum(gt / pred, pred / gt) < 1.25).astype(np.float32))
     a2 = np.mean((np.maximum(gt / pred, pred / gt) < 1.25 ** 2).astype(np.float32))
     a3 = np.mean((np.maximum(gt / pred, pred / gt) < 1.25 ** 3).astype(np.float32))
-    return [abs_diff, abs_rel, a1, a2, a3]
+    return [abs_diff, abs_rel, a1, a2, a3, a0]
 
 
 def load_image(file_path):
@@ -109,6 +110,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
 
     abs_diff_total = 0
     abs_rel_total = 0
+    a0_total = 0
     a1_total = 0
     a2_total = 0
     a3_total = 0
@@ -143,6 +145,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         a1_total += errs[2]
         a2_total += errs[3]
         a3_total += errs[4]
+        a0_total += errs[5]
         count += 1
 
         if show:
@@ -174,10 +177,11 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
     a1_avg = a1_total / count
     a2_avg = a2_total / count
     a3_avg = a3_total / count
+    a0_avg = a0_total / count
     recall = recall / count
 
     errs = {'abs_diff': abs_diff_avg, 'abs_rel': abs_rel_avg,
-            'a1': a1_avg, 'a2': a2_avg, 'a3': a3_avg,
+            'a0': a0_avg, 'a1': a1_avg, 'a2': a2_avg, 'a3': a3_avg,
             'recall': recall}
 
     icp2d.plot_scale_and_shift()
