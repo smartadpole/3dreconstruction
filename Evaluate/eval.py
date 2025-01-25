@@ -24,7 +24,7 @@ from utils.file import MkdirSimple
 
 MIN = 0.0001
 MAX = 65535.0 - 1
-MAX_DISTANCE4Eval = 500.0
+MAX_DISTANCE4Eval = 500.0  # 5 meters
 MAX_DISTANCE4Save = 700.0
 
 def GetArgs():
@@ -122,14 +122,15 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         pred = load_image(pred_path)
 
         # to cm
-        gt = (gt / 255.0  * 100 * 0.25).astype(np.uint16)
-        mask_gt = (gt > MIN) & (gt < MAX_DISTANCE4Eval) # 10 meters
-        mask_pred = (pred > MIN) & (pred < MAX)
+        gt_cm = (gt / 255.0  * 100 * 0.25).astype(np.uint16) # to cm
+        mask_gt = (gt_cm > MIN) & (gt_cm < MAX_DISTANCE4Eval)
+        mask_pred = (pred > MIN) & (pred < 65535)
         mask = mask_gt & mask_pred
 
         pred_missing_ratio = np.sum(mask) / np.sum(mask_gt)
         recall += pred_missing_ratio
 
+        gt = gt * 10
         scale, shift = icp2d.compute_scale_and_shift(pred, gt, mask)
         pred_aligned = icp2d.align(pred, scale, shift)
 
@@ -152,13 +153,16 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             # pred_aligned[mask_gt] = gt[mask_gt]
             save_path = os.path.join(save_dir, pred_path[len(predicted_dir.rstrip('/'))+1:])
             MkdirSimple(save_path)
+            mask_max = pred == 65535
+            mask_invalid = pred <= MIN
             pred = pred.astype(np.float32)
             pred_aligned = icp2d.align(pred, scale, shift)
-            mask_invalid = pred > MAX
-            pred_aligned = np.clip(pred_aligned, 0, MAX_DISTANCE4Save)
-            pred_aligned = pred_aligned / MAX_DISTANCE4Save * 65535.0
             pred_aligned = pred_aligned.astype("uint16")
-            pred_aligned[mask_invalid] = 65535
+            mask_invalid = mask_invalid | (pred_aligned <= MIN)
+            max_value = pred_aligned[mask_max].max() if mask_max.any() else 65535
+            max_value = min(max_value, 65535)
+            pred_aligned[pred_aligned >= max_value] = max_value
+            pred_aligned[mask_invalid] = 0
             cv2.imwrite(save_path, pred_aligned)
 
     abs_diff_avg = abs_diff_total / count
