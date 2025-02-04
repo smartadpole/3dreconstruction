@@ -115,6 +115,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
     a2_total = 0
     a3_total = 0
     count = 0
+    count_invalid = 0
     recall = 0
 
     icp2d = ScaleShiftAnalyzer()
@@ -125,13 +126,20 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
 
         # to cm
         gt_cm = (gt / 255.0  * 100 * 0.25).astype(np.uint16) # to cm
-        mask_gt = (gt_cm > MIN) & (gt_cm < MAX_DISTANCE4Eval)
+        # gt_cm = (gt / 65535.0 * 20  * 100).astype(np.uint16) # to cm
+        mask_gt = (gt_cm > MIN) & (gt_cm < MAX_DISTANCE4Eval) & (gt > MIN) & (gt < 65535)
         mask_pred = (pred > MIN) & (pred < 65535)
         mask = mask_gt & mask_pred
+
+        sum_gt = np.sum(mask_gt)
+        if sum_gt == 0 or np.sum(mask) == 0:
+            count_invalid += 1
+            continue
 
         pred_missing_ratio = np.sum(mask) / np.sum(mask_gt)
         recall += pred_missing_ratio
 
+        # todo: hao 2025-02-04 15:45 - why scale
         gt = gt * 10.0
         gt[gt > 65535] = 65535
         gt = gt.astype(np.uint16)
@@ -152,7 +160,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             print(errs)
             name = '/'.join(gt_path.split('/')[-3:])
             rgb = load_image(rgb_path) if rgb_path is not None else np.zeros_like(gt)
-            min_invalide = gt[gt_cm >= MAX_DISTANCE4Eval].min()
+            min_invalide = gt[gt_cm >= MAX_DISTANCE4Eval].min() if (gt_cm >= MAX_DISTANCE4Eval).any() else gt.max()
             visualize_image(rgb, gt, pred_aligned, min_invalide, name)
 
         if save_dir:
@@ -184,10 +192,12 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
             'a0': a0_avg, 'a1': a1_avg, 'a2': a2_avg, 'a3': a3_avg,
             'recall': recall}
 
-    icp2d.plot_scale_and_shift()
     print("Errors:")
     for key, value in errs.items():
         print(f"  {key}: {value:.6f}")
+
+    print(f"Invalid item count: {count_invalid}")
+    icp2d.plot_scale_and_shift()
 
 def main():
     args = GetArgs()
