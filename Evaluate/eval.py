@@ -125,8 +125,8 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         pred = load_image(pred_path)
 
         # to cm
-        gt_cm = (gt / 255.0  * 100 * 0.25).astype(np.uint16) # to cm
-        # gt_cm = (gt / 65535.0 * 20  * 100).astype(np.uint16) # to cm
+        # gt_cm = (gt / 255.0  * 100 * 0.25).astype(np.uint16) # to cm
+        gt_cm = (gt / 65535.0 * 20  * 100).astype(np.uint16) # to cm
         mask_gt = (gt_cm > MIN) & (gt_cm < MAX_DISTANCE4Eval) & (gt > MIN) & (gt < 65535)
         mask_pred = (pred > MIN) & (pred < 65535)
         mask = mask_gt & mask_pred
@@ -140,7 +140,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         recall += pred_missing_ratio
 
         # todo: hao 2025-02-04 15:45 - why scale
-        gt = gt * 10.0
+        # gt = gt * 10.0
         gt[gt > 65535] = 65535
         gt = gt.astype(np.uint16)
 

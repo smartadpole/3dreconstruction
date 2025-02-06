@@ -48,7 +48,11 @@ class ScaleShiftAnalyzer:
         return scale, shift
 
     def align(self, prediction, scale, shift):
-        return (prediction * scale + shift).astype(prediction.dtype)
+        prediction = prediction.astype(np.float64)
+        prediction = prediction * scale + shift
+        prediction[prediction < 0] = 0
+        prediction[prediction > 65535] = 65535
+        return prediction.astype(prediction.dtype)
 
     def plot_scale_and_shift(self):
 
