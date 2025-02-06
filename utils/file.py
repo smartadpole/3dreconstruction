@@ -72,9 +72,13 @@ def GetImages(path):
 def match_images(paths:list):
     lists = [ReadImageList(path) for path in paths]
 
+    common_files = None
     for i, files in enumerate(lists):
-        files = [f[len((paths[i]).rstrip('/'))+1:] for f in files]
-        common_files = set(files)
+        files = [os.path.relpath(f, start=paths[i]) for f in files]
+        if common_files is None:
+            common_files = set(files)
+        else:
+            common_files.intersection_update(files)
 
     common_files = list(common_files)
     try:
