@@ -144,7 +144,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         gt[gt > 65535] = 65535
         gt = gt.astype(np.uint16)
 
-        scale, shift = icp2d.compute_scale_and_shift(pred, gt, mask)
+        scale, shift = icp2d.scaling(pred, gt, mask)
         pred_aligned = icp2d.align(pred, scale, shift)
 
         errs = compute_errors(gt, pred_aligned, mask)

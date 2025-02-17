@@ -20,6 +20,7 @@ from utils.file import ReadImageList, MkdirSimple, match_images
 import cv2
 from utils.dataset import ConfigLoader
 from utils.utils import timeit
+from PointClould.ICP2D import ScaleShiftAnalyzer
 
 def GetArgs():
     parser = argparse.ArgumentParser(description="",
@@ -59,6 +60,27 @@ def transform_point(T, X):
     X_h = np.array([X[0], X[1], X[2], 1.0])
     X_h_new = T.dot(X_h)
     return X_h_new[:3] / X_h_new[3]
+
+def depth2point3D(depth, K):
+    height, width = depth.shape
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    points_3d = np.zeros((height, width, 3), dtype=np.float32)
+
+    for v in range(height):
+        for u in range(width):
+            z = depth[v, u]
+            if z <= 0:
+                continue
+
+            x = (u - cx) * z / fx
+            y = (v - cy) * z / fy
+
+            points_3d[v, u] = [x, y, z]
+
+    return points_3d
+
 
 def residual_scale(s, matches, depth, K_left, K_right, T_left_right):
     """
@@ -143,19 +165,25 @@ def feature_matching(left_image, right_image):
 
     return kp1, kp2, matches
 
-# 计算基础矩阵
-def calculate_fundamental_matrix(kp1, kp2, matches):
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
-
-    F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_8POINT)
-    return F, mask
-
-# 三角化计算3D点
-def triangulate_points(kp1, kp2, matches, K):
+def get_valid_point(kp1, kp2, matches):
     kp1_valid = np.float32([kp1[m.queryIdx].pt for m in matches])
     kp2_valid = np.float32([kp2[m.trainIdx].pt for m in matches])
 
+    return kp1_valid, kp2_valid
+
+def get_valid_point_gt(points, index):
+    valid_point = np.array([points[int(y), int(x)] for x, y in index])
+
+    return valid_point
+
+
+# 计算基础矩阵
+def calculate_fundamental_matrix(kp1_valid, kp2_valid):
+    F, mask = cv2.findFundamentalMat(kp1_valid, kp2_valid, cv2.FM_8POINT)
+    return F, mask
+
+# 三角化计算3D点
+def triangulate_points(kp1_valid, kp2_valid, K):
     # 获取左右相机的投影矩阵
     E, _ = cv2.findEssentialMat(kp1_valid, kp2_valid, K)
     _, R, T, _ = cv2.recoverPose(E, kp1_valid, kp2_valid, K)
@@ -168,33 +196,6 @@ def triangulate_points(kp1, kp2, matches, K):
     # 将齐次坐标转换为非齐次坐标
     points_3d /= points_3d[3]
     return points_3d[:3].T, kp1_valid, kp2_valid
-
-def get_valid_keypoints(kp1, kp2, matches, f_mask):
-    """
-    提取匹配后有效的关键点。
-    输入:
-      kp1: 左图的关键点列表
-      kp2: 右图的关键点列表
-      matches: 特征点匹配列表，每个元素是 DMatch 对象，包含 queryIdx 和 trainIdx
-      f_mask: 一个布尔数组，表示哪些匹配是有效的
-
-    输出:
-      kp1_valid: 筛选后的有效左图关键点
-      kp2_valid: 筛选后的有效右图关键点
-    """
-    # 只选择有效的匹配点
-    valid_matches = f_mask.flatten() == 1  # 只选择有效的匹配点
-
-    # 提取有效的关键点坐标
-    kp1_valid = [kp1[m.queryIdx].pt for i, m in enumerate(matches) if valid_matches[i]]  # (N_valid, 2)
-    kp2_valid = [kp2[m.trainIdx].pt for i, m in enumerate(matches) if valid_matches[i]]  # (N_valid, 2)
-
-    # 转换为 NumPy 数组
-    kp1_valid = np.array(kp1_valid)  # (N_valid, 2)
-    kp2_valid = np.array(kp2_valid)  # (N_valid, 2)
-
-    return kp1_valid, kp2_valid
-
 
 # 计算重投影误差
 def compute_reprojection_error(points_3d, kp1, kp2, K, R, T):
@@ -235,6 +236,7 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K):
     depth = cv2.imread(file_depth, cv2.IMREAD_UNCHANGED)
     left_image = cv2.imread(file_left, cv2.IMREAD_UNCHANGED)
     right_image = cv2.imread(file_right, cv2.IMREAD_UNCHANGED)
+    points =  depth2point3D(depth, K)
 
     # 假设 baseline = 0.05m, 水平平移
     baseline = 0.05
@@ -243,11 +245,11 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K):
                              [0, 0, 1, 0],
                              [0, 0, 0, 1]], dtype=np.float32)
 
-
     kp1, kp2, matches = feature_matching(left_image, right_image)
+    kp1_valid, kp2_valid = get_valid_point(kp1, kp2, matches)
 
     # 计算基础矩阵
-    F, F_mask = calculate_fundamental_matrix(kp1, kp2, matches)
+    F, F_mask = calculate_fundamental_matrix(kp1_valid, kp2_valid)
 
     # 从基础矩阵计算本质矩阵
     E = K.T @ F @ K
@@ -255,14 +257,24 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K):
     # 对本质矩阵进行分解
     R1, R2, T = cv2.decomposeEssentialMat(E)
 
-    points_3d, kp1_valid, kp2_valid = triangulate_points(kp1, kp2, matches, K)
-    error_left, error_right = compute_reprojection_error(points_3d, kp1_valid, kp2_valid, K, R1, T)
+    points_3d, kp1_valid, kp2_valid = triangulate_points(kp1_valid, kp2_valid, K)
+    points_gt_valid = get_valid_point_gt(points, kp1_valid)
 
-    print(f"Left Reprojection Error: {error_left}, Right Reprojection Error: {error_right}")
+
+    icp2d = ScaleShiftAnalyzer()
+    scale, shift = icp2d.scaling(points_gt_valid, points_3d, local=True)
+    pred_aligned = icp2d.align(points_gt_valid, scale, shift)
+    diff = np.abs(pred_aligned - points_3d)
+    diff /= points_3d
+    diff_mean = np.mean(diff)
+    print("Mean diff: ", diff_mean)
+
+    # error_left, error_right = compute_reprojection_error(points_3d, kp1_valid, kp2_valid, K, R1, T)
+    # print(f"Left Reprojection Error: {error_left}, Right Reprojection Error: {error_right}")
 
     # 计算深度缩放尺度
-    scale = compute_scaling_factor(depth, points_3d)
-    print(f"Scaling Factor: {scale}")
+    # scale = compute_scaling_factor(depth, points_3d)
+    # print(f"Scaling Factor: {scale}")
 
     return scale
 

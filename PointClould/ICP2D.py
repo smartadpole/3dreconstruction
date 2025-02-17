@@ -14,16 +14,19 @@ sys.path.append(os.path.join(CURRENT_DIR, '../'))
 
 import numpy as np
 
-def compute_scale_and_shift(prediction, target, mask):
-    mask = mask > 0
-    pred = prediction[mask].astype(np.float64)
-    t = target[mask].astype(np.float64)
+def scaling(prediction, target, mask = None):
+    if mask is not None:
+        prediction = prediction[mask].astype(np.float64)
+        target = target[mask].astype(np.float64)
+    else:
+        prediction = prediction.astype(np.float64)
+        target = target.astype(np.float64)
 
-    a_00 = np.sum(pred * pred)
-    a_01 = np.sum(pred)
-    a_11 = len(pred)
-    b_0 = np.sum(pred * t)
-    b_1 = np.sum(t)
+    a_00 = np.sum(prediction * prediction)
+    a_01 = np.sum(prediction)
+    a_11 = len(prediction)
+    b_0 = np.sum(prediction * target)
+    b_1 = np.sum(target)
 
     det = a_00 * a_11 - a_01 * a_01
     if det < 1e-12:
@@ -34,13 +37,35 @@ def compute_scale_and_shift(prediction, target, mask):
 
     return scale, shift
 
+def scaling_point_local(prediction, target, mask=None):
+    if mask is not None:
+        prediction = prediction[mask].astype(np.float64)
+        target = target[mask].astype(np.float64)
+    else:
+        prediction = prediction.astype(np.float64)
+        target = target.astype(np.float64)
+
+    # 将点云从三维转换为二维（对每个坐标轴分别进行计算）
+    pred_x, pred_y, pred_z = prediction[:, 0], prediction[:, 1], prediction[:, 2]
+    target_x, target_y, target_z = target[:, 0], target[:, 1], target[:, 2]
+
+    scale_x, shift_x = scaling(pred_x, target_x)
+    scale_y, shift_y = scaling(pred_y, target_y)
+    scale_z, shift_z = scaling(pred_z, target_z)
+
+    return (scale_x, scale_y, scale_z), (shift_x, shift_y, shift_z)
+
+
 class ScaleShiftAnalyzer:
     def __init__(self):
         self.scales = []
         self.shifts = []
 
-    def compute_scale_and_shift(self, prediction, target, mask):
-        scale, shift = compute_scale_and_shift(prediction, target, mask)
+    def scaling(self, prediction, target, mask = None, local = False):
+        if local:
+            scale, shift = scaling_point_local(prediction, target, mask)
+        else:
+            scale, shift = scaling(prediction, target, mask)
 
         self.scales.append(scale)
         self.shifts.append(shift)
@@ -99,7 +124,7 @@ def main():
     mask = np.ones_like(x, dtype=bool)
 
     analyzer = ScaleShiftAnalyzer()
-    scale, shift = analyzer.compute_scale_and_shift(x, y, mask)
+    scale, shift = analyzer.scaling(x, y, mask)
     print(f"Computed scale: {scale}, shift: {shift}")
 
     analyzer.plot_scale_and_shift()
