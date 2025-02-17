@@ -86,8 +86,10 @@ class ConfigLoader:
             except:
                 with open(config_file, 'r') as f:
                     data = yaml.safe_load(f)
-                    K[0][0] = data['K'][0]  # fx
-                    K[0][2] = data['K'][2]  # cx
-                    K[1][1] = data['K'][4]  # fy
+                    K = np.array(data['K']).reshape(3, 3)
+                    # K[0][0] = data['K'][0]  # fx
+                    # K[0][2] = data['K'][2]  # cx
+                    # K[1][1] = data['K'][4]  # fy
+                    # K[1][2] = data['K'][5]  # fy
                     self.K_dict[config_file] = K
         return K

@@ -16,7 +16,7 @@ import argparse
 
 import numpy as np
 from scipy.optimize import least_squares
-from utils.file import ReadImageList, MkdirSimple
+from utils.file import ReadImageList, MkdirSimple, match_images
 import cv2
 from utils.dataset import ConfigLoader
 from utils.utils import timeit
@@ -25,6 +25,8 @@ def GetArgs():
     parser = argparse.ArgumentParser(description="",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--depth", type=str, help="depth image dir or file path or list of depth image files")
+    parser.add_argument("--left", type=str, help="left image dir or file path or list of depth image files")
+    parser.add_argument("--right", type=str, help="right image dir or file path or list of depth image files")
     parser.add_argument("--output", type=str, help="scaled depth image dir or file path")
 
     args = parser.parse_args()
@@ -78,7 +80,7 @@ def residual_scale(s, matches, depth, K_left, K_right, T_left_right):
     cy_L = K_left[1, 2]
 
     for (uL, vL, uR_obs, vR_obs) in matches:
-        d_pred = depth(uL, vL)  # 单目预测深度
+        d_pred = depth[uL, vL]  # 单目深度
         # 若超出范围或无效, 可做检查:
         if d_pred <= 0:
             continue
@@ -103,14 +105,13 @@ def residual_scale(s, matches, depth, K_left, K_right, T_left_right):
 
     return np.array(residuals, dtype=np.float32)
 
-@timeit(5)
-def optimize_scale(matches, K_left, K_right, T_left_right, s_init=1.0):
+def optimize_scale(depth, matches, K_left, K_right, T_left_right, s_init=1.0):
     """
     使用最小二乘方法, 优化单个尺度因子 s, 使重投影误差最小
     """
     # 定义目标函数
     def f_scale(s):
-        return residual_scale(s, matches, K_left, K_right, T_left_right)
+        return residual_scale(s, matches, depth, K_left, K_right, T_left_right)
 
     # 使用 scipy.optimize.least_squares
     res = least_squares(
@@ -151,38 +152,67 @@ def calculate_fundamental_matrix(kp1, kp2, matches):
     return F, mask
 
 # 三角化计算3D点
-def triangulate_points(left_image, right_image, kp1, kp2, matches, K):
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+def triangulate_points(kp1, kp2, matches, K):
+    kp1_valid = np.float32([kp1[m.queryIdx].pt for m in matches])
+    kp2_valid = np.float32([kp2[m.trainIdx].pt for m in matches])
 
     # 获取左右相机的投影矩阵
-    E, _ = cv2.findEssentialMat(pts1, pts2, K)
-    _, R, T, _ = cv2.recoverPose(E, pts1, pts2, K)
+    E, _ = cv2.findEssentialMat(kp1_valid, kp2_valid, K)
+    _, R, T, _ = cv2.recoverPose(E, kp1_valid, kp2_valid, K)
 
     # 使用三角化计算3D点
     proj_matrix_left = np.hstack((np.eye(3), np.zeros((3, 1))))  # 左目投影矩阵
     proj_matrix_right = np.hstack((R, T))  # 右目投影矩阵
-    points_3d = cv2.triangulatePoints(proj_matrix_left, proj_matrix_right, pts1.T, pts2.T)
+    points_3d = cv2.triangulatePoints(proj_matrix_left, proj_matrix_right, kp1_valid.T, kp2_valid.T)
 
     # 将齐次坐标转换为非齐次坐标
     points_3d /= points_3d[3]
-    return points_3d[:3].T  # 返回3D点
+    return points_3d[:3].T, kp1_valid, kp2_valid
+
+def get_valid_keypoints(kp1, kp2, matches, f_mask):
+    """
+    提取匹配后有效的关键点。
+    输入:
+      kp1: 左图的关键点列表
+      kp2: 右图的关键点列表
+      matches: 特征点匹配列表，每个元素是 DMatch 对象，包含 queryIdx 和 trainIdx
+      f_mask: 一个布尔数组，表示哪些匹配是有效的
+
+    输出:
+      kp1_valid: 筛选后的有效左图关键点
+      kp2_valid: 筛选后的有效右图关键点
+    """
+    # 只选择有效的匹配点
+    valid_matches = f_mask.flatten() == 1  # 只选择有效的匹配点
+
+    # 提取有效的关键点坐标
+    kp1_valid = [kp1[m.queryIdx].pt for i, m in enumerate(matches) if valid_matches[i]]  # (N_valid, 2)
+    kp2_valid = [kp2[m.trainIdx].pt for i, m in enumerate(matches) if valid_matches[i]]  # (N_valid, 2)
+
+    # 转换为 NumPy 数组
+    kp1_valid = np.array(kp1_valid)  # (N_valid, 2)
+    kp2_valid = np.array(kp2_valid)  # (N_valid, 2)
+
+    return kp1_valid, kp2_valid
+
 
 # 计算重投影误差
 def compute_reprojection_error(points_3d, kp1, kp2, K, R, T):
     proj_matrix_left = np.hstack((np.eye(3), np.zeros((3, 1))))  # 左目投影矩阵
     proj_matrix_right = np.hstack((R, T))  # 右目投影矩阵
 
-    # 对3D点进行重投影
-    projected_pts_left = K @ points_3d.T
-    projected_pts_left /= projected_pts_left[2]
-    projected_pts_left = projected_pts_left.T
+    # 对 3D 点进行重投影，得到左目和右目上的投影像素
+    # 投影到左目图像
+    projected_pts_left = K @ points_3d.T # 3xN 矩阵
+    projected_pts_left /= projected_pts_left[2]  # 进行透视除法，归一化
+    projected_pts_left = projected_pts_left[:2].T  # 转换为 N×2 的形状 (uL, vL)
 
-    projected_pts_right = K @ (R @ points_3d + T)
-    projected_pts_right /= projected_pts_right[2]
-    projected_pts_right = projected_pts_right.T
+    # 投影到右目图像
+    projected_pts_right = K @ (R @ points_3d.T + T)  # 3xN 矩阵
+    projected_pts_right /= projected_pts_right[2]  # 进行透视除法，归一化
+    projected_pts_right = projected_pts_right[:2].T  # 转换为 N×2 的形状 (uR, vR)
 
-    # 计算重投影误差
+    # 计算重投影误差，计算左目和右目的投影点与特征点之间的欧氏距离
     error_left = np.sqrt(np.sum((kp1 - projected_pts_left) ** 2, axis=1))
     error_right = np.sqrt(np.sum((kp2 - projected_pts_right) ** 2, axis=1))
 
@@ -201,8 +231,10 @@ def compute_scaling_factor(left_depth, points_3d):
     scale = mean_depth / mean_z
     return scale
 
-def get_scale_by_feature_match(file, intrinsic, left_image, right_image):
-    depth = cv2.imread(file, cv2.IMREAD_UNCHANGED)
+def get_scale_by_feature_match(file_depth, file_left, file_right, K):
+    depth = cv2.imread(file_depth, cv2.IMREAD_UNCHANGED)
+    left_image = cv2.imread(file_left, cv2.IMREAD_UNCHANGED)
+    right_image = cv2.imread(file_right, cv2.IMREAD_UNCHANGED)
 
     # 假设 baseline = 0.05m, 水平平移
     baseline = 0.05
@@ -214,12 +246,18 @@ def get_scale_by_feature_match(file, intrinsic, left_image, right_image):
 
     kp1, kp2, matches = feature_matching(left_image, right_image)
 
-    F, mask = calculate_fundamental_matrix(kp1, kp2, matches)
+    # 计算基础矩阵
+    F, F_mask = calculate_fundamental_matrix(kp1, kp2, matches)
 
-    points_3d = triangulate_points(left_image, right_image, kp1, kp2, matches, intrinsic)
+    # 从基础矩阵计算本质矩阵
+    E = K.T @ F @ K
 
-    # 计算重投影误差
-    error_left, error_right = compute_reprojection_error(points_3d, kp1, kp2, intrinsic, *cv2.decomposeEssentialMat(F))
+    # 对本质矩阵进行分解
+    R1, R2, T = cv2.decomposeEssentialMat(E)
+
+    points_3d, kp1_valid, kp2_valid = triangulate_points(kp1, kp2, matches, K)
+    error_left, error_right = compute_reprojection_error(points_3d, kp1_valid, kp2_valid, K, R1, T)
+
     print(f"Left Reprojection Error: {error_left}, Right Reprojection Error: {error_right}")
 
     # 计算深度缩放尺度
@@ -244,7 +282,7 @@ def get_scale_by_lr_consistency(file, intrinsic):
         [320, 240, 315, 245],
         [400, 300, 395, 305],
         [260, 130, 255, 128],
-    ], dtype=np.float32)
+    ], dtype=np.uint8)
 
     # 模拟深度预测 depth_pred 数组(480×640), 这里用常数举例
     H, W = 480, 640
@@ -252,20 +290,26 @@ def get_scale_by_lr_consistency(file, intrinsic):
 
     # 优化求解尺度
     s_init = 1.0
-    s_opt, result = optimize_scale(matches, intrinsic, intrinsic, T_left_right, s_init)
+    s_opt, result = optimize_scale(depth, matches, intrinsic, intrinsic, T_left_right, s_init)
     print(f"Optimal scale = {s_opt:.3f}")
     print(f"Final RMS reprojection error = {np.sqrt(np.mean(result.fun**2)):.3f} pixels")
 
 
 def main():
     args = GetArgs()
-
-    files = ReadImageList(args.depth)
     config  = ConfigLoader()
 
-    for f in files:
-        intrinsic = config.set_by_config_yaml(f)
-        scale = get_scale_by_lr_consistency(f, intrinsic)
+    if not args.left:
+        files = ReadImageList(args.depth)
+        for f in files:
+            intrinsic = config.set_by_config_yaml(f)
+            scale = get_scale_by_lr_consistency(f, intrinsic)
+    else:
+        files = match_images([args.depth, args.left, args.right])
+
+        for depth, left, right in zip(*files):
+            intrinsic = config.set_by_config_yaml(depth)
+            scale = get_scale_by_feature_match(depth, left, right, intrinsic)
 
 
 if __name__ == '__main__':

@@ -30,6 +30,8 @@ def WalkImage(path):
 
 def ReadImageList(image_path):
     """Get a list of image paths from a directory or a single image path."""
+    if not image_path:
+        return []
     if os.path.isfile(image_path):
         if image_path.endswith(tuple(FILE_SUFFIX)):
             return [image_path]
