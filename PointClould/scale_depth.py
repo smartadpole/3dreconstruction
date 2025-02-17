@@ -22,6 +22,8 @@ from utils.dataset import ConfigLoader
 from utils.utils import timeit
 from PointClould.ICP2D import ScaleShiftAnalyzer
 
+MIN = 0
+
 def GetArgs():
     parser = argparse.ArgumentParser(description="",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -80,6 +82,22 @@ def depth2point3D(depth, K):
             points_3d[v, u] = [x, y, z]
 
     return points_3d
+
+def point3D2depth(points_3d):
+    height, width, _ = points_3d.shape
+
+    depth = np.zeros((height, width), dtype=np.float32)
+
+    for v in range(height):
+        for u in range(width):
+            x, y, z = points_3d[v, u]
+            if z <= 0:
+                continue
+
+            # Calculate depth based on 3D coordinates
+            depth[v, u] = z
+
+    return depth
 
 
 def residual_scale(s, matches, depth, K_left, K_right, T_left_right):
@@ -182,6 +200,19 @@ def calculate_fundamental_matrix(kp1_valid, kp2_valid):
     F, mask = cv2.findFundamentalMat(kp1_valid, kp2_valid, cv2.FM_8POINT)
     return F, mask
 
+def calc_depth(kp1_valid, kp2_valid, K, baseline = 0.05):
+    mask = np.abs(kp1_valid[:, -1]  - kp2_valid[:, -1]) < 0.05
+    disparity = kp1_valid[:, 0] - kp2_valid[:, 0]
+    depth = (K[0, 0] * baseline) / disparity
+    mask = mask & (depth > 0)
+    depth[~mask] = 0
+    depth[depth == np.inf] = 0
+    depth *= 100 # to cm
+    mask = depth > 0
+
+    return depth, mask
+
+
 # 三角化计算3D点
 def triangulate_points(kp1_valid, kp2_valid, K):
     # 获取左右相机的投影矩阵
@@ -195,7 +226,7 @@ def triangulate_points(kp1_valid, kp2_valid, K):
 
     # 将齐次坐标转换为非齐次坐标
     points_3d /= points_3d[3]
-    return points_3d[:3].T, kp1_valid, kp2_valid
+    return points_3d[:3].T
 
 # 计算重投影误差
 def compute_reprojection_error(points_3d, kp1, kp2, K, R, T):
@@ -232,42 +263,66 @@ def compute_scaling_factor(left_depth, points_3d):
     scale = mean_depth / mean_z
     return scale
 
-def get_scale_by_feature_match(file_depth, file_left, file_right, K):
+@timeit(20)
+def scaling(left_image, right_image, depth, K, ICP):
+    kp1, kp2, matches = feature_matching(left_image, right_image)
+    kp1_valid, kp2_valid = get_valid_point(kp1, kp2, matches)
+
+    # points_3d = triangulate_points(kp1_valid, kp2_valid, K)
+    depth_stereo, mask = calc_depth(kp1_valid, kp2_valid, K)
+
+    valid_pred = get_valid_point_gt(depth, kp1_valid)
+    valid_mask = (valid_pred > MIN) & (valid_pred < 65535)
+    mask = mask & valid_mask
+
+    scale, shift = ICP.scaling(valid_pred, depth_stereo, mask=mask)
+
+    pred_aligned = ICP.align(valid_pred, scale, shift)
+
+    diff = np.abs(pred_aligned - depth_stereo) * mask
+    diff /= (depth_stereo + 1e-6)
+    diff_mean_points = np.mean(diff, axis = 0)
+    print("Mean diff:(points, depth image): {:.2f}".format(diff_mean_points))
+
+    return scale, shift, diff_mean_points
+
+def get_scale_by_feature_match(file_depth, file_left, file_right, K, ICP):
     depth = cv2.imread(file_depth, cv2.IMREAD_UNCHANGED)
     left_image = cv2.imread(file_left, cv2.IMREAD_UNCHANGED)
     right_image = cv2.imread(file_right, cv2.IMREAD_UNCHANGED)
-    points =  depth2point3D(depth, K)
+    # points =  depth2point3D(depth, K)
 
-    # 假设 baseline = 0.05m, 水平平移
     baseline = 0.05
     T_left_right = np.array([[1, 0, 0, -baseline],
                              [0, 1, 0, 0],
                              [0, 0, 1, 0],
                              [0, 0, 0, 1]], dtype=np.float32)
 
-    kp1, kp2, matches = feature_matching(left_image, right_image)
-    kp1_valid, kp2_valid = get_valid_point(kp1, kp2, matches)
+    scale, shift, diff_mean_points = scaling(left_image, right_image, depth, K, ICP)
+    depth_scaled = ICP.align(depth, scale, shift)
 
-    # 计算基础矩阵
-    F, F_mask = calculate_fundamental_matrix(kp1_valid, kp2_valid)
+    return scale, shift, depth_scaled
 
-    # 从基础矩阵计算本质矩阵
-    E = K.T @ F @ K
+    # ----------------------------------------------
+    gt_file = file_left.replace('left', 'depth')
 
-    # 对本质矩阵进行分解
-    R1, R2, T = cv2.decomposeEssentialMat(E)
+    depth_gt = cv2.imread(gt_file, cv2.IMREAD_UNCHANGED)
+    depth_gt = (depth_gt / 255.0  * 100 * 0.25).astype(np.float64) # to cm
 
-    points_3d, kp1_valid, kp2_valid = triangulate_points(kp1_valid, kp2_valid, K)
-    points_gt_valid = get_valid_point_gt(points, kp1_valid)
+    mask_gt = (depth_gt > MIN) & (depth_gt < 255)
+    mask_pred = (depth > MIN) & (depth < 65535)
+    mask = mask_gt & mask_pred
 
-
-    icp2d = ScaleShiftAnalyzer()
-    scale, shift = icp2d.scaling(points_gt_valid, points_3d, local=True)
-    pred_aligned = icp2d.align(points_gt_valid, scale, shift)
-    diff = np.abs(pred_aligned - points_3d)
-    diff /= points_3d
+    diff = np.abs(depth_scaled - depth_gt) * mask
+    diff /= (depth_gt + 1e-6)
     diff_mean = np.mean(diff)
-    print("Mean diff: ", diff_mean)
+
+
+    diff = np.abs(depth - depth_gt) * mask
+    diff /= (depth_gt + 1e-6)
+    diff_mean_origin = np.mean(diff)
+
+    print("Mean diff:(points, depth image, origin depth): {:.2f}, {:.2f}, {:.2f}".format(diff_mean_points, diff_mean, diff_mean_origin))
 
     # error_left, error_right = compute_reprojection_error(points_3d, kp1_valid, kp2_valid, K, R1, T)
     # print(f"Left Reprojection Error: {error_left}, Right Reprojection Error: {error_right}")
@@ -276,7 +331,7 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K):
     # scale = compute_scaling_factor(depth, points_3d)
     # print(f"Scaling Factor: {scale}")
 
-    return scale
+    return scale, shift, depth_scaled
 
 def get_scale_by_lr_consistency(file, intrinsic):
     depth = cv2.imread(file, cv2.IMREAD_UNCHANGED)
@@ -318,10 +373,19 @@ def main():
             scale = get_scale_by_lr_consistency(f, intrinsic)
     else:
         files = match_images([args.depth, args.left, args.right])
+        root_len = len(args.depth.rstrip('/'))
+
+        ICP = ScaleShiftAnalyzer()
 
         for depth, left, right in zip(*files):
-            intrinsic = config.set_by_config_yaml(depth)
-            scale = get_scale_by_feature_match(depth, left, right, intrinsic)
+            intrinsic = config.set_by_config_yaml(left)
+            scale, shift, depth_scaled = get_scale_by_feature_match(depth, left, right, intrinsic, ICP)
+
+            if args.output:
+                name = depth[root_len+1:]
+                output_file = os.path.join(args.output, name)
+                MkdirSimple(output_file)
+                cv2.imwrite(output_file, depth_scaled)
 
 
 if __name__ == '__main__':
