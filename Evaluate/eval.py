@@ -33,6 +33,7 @@ def GetArgs():
     parser.add_argument("--pred", type=str, required=True, help="Directory containing predicted depth maps")
     parser.add_argument("--rgb", type=str, help="Directory containing rgb image")
     parser.add_argument("--show", action="store_true", help="Show result")
+    parser.add_argument("--align", action="store_true", help="scale when compare gt and depth")
     parser.add_argument("--save", type=str, help="Directory to save aligned depth maps")
     parser.add_argument("--max_dist", type=int, default=500, help="max distance for evaluation (cm)")
 
@@ -101,7 +102,7 @@ def visualize_image(rgb, gt, pred, min_invalid, name="result"):
 
     plt.show()
 
-def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir, MAX_DISTANCE4Eval):
+def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir, MAX_DISTANCE4Eval, align = True):
     if not rgb_dir:
         gt_images, pred_images = match_images([ground_truth_dir, predicted_dir])
         rgb_images = [None] * len(gt_images)
@@ -126,7 +127,7 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
 
         # to cm
         # gt_cm = (gt / 255.0  * 100 * 0.25).astype(np.uint16) # to cm
-        gt_cm = (gt / 65535.0 * 20  * 100).astype(np.uint16) # to cm
+        gt_cm = (gt / 65535.0 * 2000).astype(np.uint16) # max valid distance is 20m
         mask_gt = (gt_cm > MIN) & (gt_cm < MAX_DISTANCE4Eval) & (gt > MIN) & (gt < 65535)
         mask_pred = (pred > MIN) & (pred < 65535)
         mask = mask_gt & mask_pred
@@ -144,12 +145,18 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         gt[gt > 65535] = 65535
         gt = gt.astype(np.uint16)
 
-        scale, shift = icp2d.scaling(pred, gt, mask)
-        pred_aligned = icp2d.align(pred, scale, shift)
+        if align:
+            scale, shift = icp2d.scaling(pred, gt, mask)
+            pred_aligned = icp2d.align(pred, scale, shift)
+        else:
+            scale, shift = 1, 0
+            pred_aligned = (pred / 65535.0 * 2000).astype(np.uint16) # max valid distance is 20m
 
+        gt = gt / 10 # to cm
         errs = compute_errors(gt, pred_aligned, mask)
         abs_diff_total += errs[0]
         abs_rel_total += errs[1]
+        # print("errs[1] {} \nin file {}".format(errs[1], pred_path))
         a1_total += errs[2]
         a2_total += errs[3]
         a3_total += errs[4]
@@ -196,12 +203,13 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
     for key, value in errs.items():
         print(f"  {key}: {value:.6f}")
 
-    print(f"Invalid item count: {count_invalid}")
-    icp2d.plot_scale_and_shift()
+    if align:
+        print(f"Invalid item count: {count_invalid}")
+        icp2d.plot_scale_and_shift()
 
 def main():
     args = GetArgs()
-    evaluate_depth_maps(args.gt, args.pred, args.rgb, args.show, args.save, args.max_dist)
+    evaluate_depth_maps(args.gt, args.pred, args.rgb, args.show, args.save, args.max_dist, args.align)
 
 
 if __name__ == '__main__':

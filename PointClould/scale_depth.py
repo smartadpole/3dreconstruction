@@ -21,8 +21,11 @@ import cv2
 from utils.dataset import ConfigLoader
 from utils.utils import timeit
 from PointClould.ICP2D import ScaleShiftAnalyzer
+from tqdm.contrib import tzip
+from tqdm import tqdm
 
 MIN = 0
+VALID_DISTANCE = 2000 # 20m
 
 def GetArgs():
     parser = argparse.ArgumentParser(description="",
@@ -264,6 +267,14 @@ def compute_scaling_factor(left_depth, points_3d):
     return scale
 
 @timeit(20)
+def depth2save(depth):
+    depth = depth.astype(np.float32)
+    depth[depth < 0] = 0
+    depth[depth > VALID_DISTANCE] = VALID_DISTANCE
+    depth = (depth / VALID_DISTANCE * 65535).astype(np.uint16)
+    return depth
+
+@timeit(20)
 def scaling(left_image, right_image, depth, K, ICP):
     kp1, kp2, matches = feature_matching(left_image, right_image)
     kp1_valid, kp2_valid = get_valid_point(kp1, kp2, matches)
@@ -300,6 +311,10 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K, ICP):
 
     scale, shift, diff_mean_points = scaling(left_image, right_image, depth, K, ICP)
     depth_scaled = ICP.align(depth, scale, shift)
+
+    mask = (depth > MIN) & (depth < 65535) & (depth_scaled > MIN) & (depth_scaled < 65535)
+    depth_scaled[~mask] = 0
+    depth_scaled = depth2save(depth_scaled)
 
     return scale, shift, depth_scaled
 
@@ -377,7 +392,7 @@ def main():
 
         ICP = ScaleShiftAnalyzer()
 
-        for depth, left, right in zip(*files):
+        for depth, left, right in tzip(*files):
             intrinsic = config.set_by_config_yaml(left)
             scale, shift, depth_scaled = get_scale_by_feature_match(depth, left, right, intrinsic, ICP)
 
