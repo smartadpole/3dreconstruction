@@ -40,7 +40,7 @@ def GetArgs():
 
 # 假设存在的配置
 MIN = 0
-VALID_DISTANCE = 700  # 7m
+VALID_DISTANCE = 300  # 7m
 
 
 def to_rotation(position, orientation):
@@ -73,6 +73,7 @@ def load_pose(pose_file):
             orientation = pose_data['orientation']
             secs = frame['header']['stamp']['secs']
             nsecs = frame['header']['stamp']['nsecs']
+            nsecs = f"{nsecs:09d}"[:-3]
 
             pose_key = f"{secs}{nsecs}"
             pose = {
@@ -86,6 +87,7 @@ def load_pose(pose_file):
 
 def get_pose(poses, file):
     timestamp = os.path.splitext(os.path.basename(file))[0]
+    timestamp = timestamp[:-3]
 
     if timestamp not in poses:
         return None, None
@@ -94,6 +96,7 @@ def get_pose(poses, file):
     rotation, translation = to_rotation(p['position'], p['orientation'])
 
     return rotation, translation
+
 
 def load_extrinsic(file):
     with open(file, 'r') as file:
@@ -289,7 +292,11 @@ def main():
         depth_reconstructed = process_point_cloud(depth, intrinsic, rotation_camera, translation_camera, left)
         point_clouds.append(depth_reconstructed)
 
-        visualize_point_cloud(point_clouds)
+        if len(point_clouds) % 10 == 0:
+            visualize_point_cloud(point_clouds)
+
+    visualize_point_cloud(point_clouds)
+
     output_dir = os.path.dirname(args.depth) if os.path.isfile(args.depth) else args.depth
     output_file = os.path.join(output_dir, "world.pcl")
 
