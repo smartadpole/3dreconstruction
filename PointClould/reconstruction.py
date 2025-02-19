@@ -189,6 +189,8 @@ def depth2point_cloud_matrix(depth, K):
     return points_3d
 
 def preprocess(depth):
+    # depth = cv2.medianBlur(depth, 5)
+
     valid_mask = (depth > MIN) & (depth < 65535)
     depth[~valid_mask] = 0
 
@@ -286,7 +288,7 @@ def main():
         if left_file is not None:
             colors.append(color)
 
-        if len(point_clouds) % 20 == 0:
+        if len(point_clouds) % 10 == 0:
             visualize_point_cloud(point_clouds, colors)
 
     visualize_point_cloud(point_clouds, colors)
