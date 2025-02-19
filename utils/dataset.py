@@ -71,6 +71,9 @@ class ConfigLoader:
         if config_file in self.K_dict:
             K = self.K_dict[config_file]
         else:
+            if not os.path.exists(config_file):
+                print("no config file, please check dir {}.".format(folder))
+                exit(1)
             try:
                 with open(config_file, 'r') as f:
                     for line in f:
