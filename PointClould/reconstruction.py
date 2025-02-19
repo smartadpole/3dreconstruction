@@ -142,21 +142,30 @@ def get_camera_pose(imu_rotation_matrix, imu_translation, pose_imu2camera):
     return camera_rotation, camera_translation
 
 
-def depth2point_cloud(dpeth, K):
+def depth2point_cloud(dpeth, K, image=None):
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
     height, width = dpeth.shape
+    if image is not None:
+        height, width = min(dpeth.shape[0], image.shape[0]), min(dpeth.shape[1], image.shape[1])
     point_cloud = []
+    colors = []
 
     for v in range(height):
         for u in range(width):
             Z = dpeth[v, u]
-            if Z > 0 :
-                X = (u - cx) * Z / fx
-                Y = (v - cy) * Z / fy
-                point_cloud.append([X, Y, Z])
+            if Z < 0 :
+                continue
 
-    return np.array(point_cloud)
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
+            point_cloud.append([X, Y, Z])
+
+            if image is not None:
+                color = image[v, u] / 255.0
+                colors.append(color)
+
+    return np.array(point_cloud), np.array(colors)
 
 # 将深度图转换为3D点云
 def depth2point_cloud_matrix(depth, K):
@@ -218,10 +227,10 @@ def process_point_cloud(depth, K, rotation, translation, left_image=None):
     # scale, shift = ICP.scaling(points_3d, points_3d)
     # points_3d_aligned = ICP.align(points_3d, scale, shift)
 
-    point_cloud = depth2point_cloud(depth, K)
+    point_cloud, colors = depth2point_cloud(depth, K, left_image)
     point_cloud_transformed = transform_point_cloud(point_cloud, rotation, translation)
 
-    return point_cloud_transformed
+    return point_cloud_transformed, colors
 
 # 使用位姿进行坐标变换
 def transform_point_cloud(point_cloud, rotation, translation):
@@ -230,40 +239,22 @@ def transform_point_cloud(point_cloud, rotation, translation):
     return point_cloud_transformed
 
 
-def visualize_point_cloud(points):
+def visualize_point_cloud(points, colors):
     pcd = o3d.geometry.PointCloud()
-    for cloud in points:
+    for i, cloud in enumerate(points):
         pcd.points.extend(o3d.utility.Vector3dVector(cloud))
+        if len(colors) == len(points):
+            pcd.colors.extend(o3d.utility.Vector3dVector(colors[i]))
 
     o3d.visualization.draw_geometries([pcd])
     return
-
-    pcd = o3d.geometry.PointCloud()
-    try:
-        pcd.points = o3d.utility.Vector3dVector(np.array(points))
-        # pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
-        vis = o3d.visualization.Visualizer()
-        vis.create_window()
-        vis.add_geometry(pcd)
-
-        view_ctl = vis.get_view_control()
-        view_ctl.set_front([0, 0, -1])
-        view_ctl.set_lookat([0, 0, 0])
-        view_ctl.set_up([0, -1, 0])
-        view_ctl.set_zoom(0.1)
-
-        vis.poll_events()
-        vis.update_renderer()
-        vis.run()
-        vis.destroy_window()
-    except Exception as e:
-        print(f"Error: {e}")
 
 # 主函数处理整个过程
 def main():
     args = GetArgs()
     config  = ConfigLoader()
     point_clouds = []
+    colors = []
 
     poses = load_pose(args.pose)
     extrinsic = load_extrinsic(args.extrinsic)
@@ -288,14 +279,17 @@ def main():
 
         depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
         left = cv2.imread(left_file, cv2.IMREAD_UNCHANGED) if left_file else None
+        left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
 
-        depth_reconstructed = process_point_cloud(depth, intrinsic, rotation_camera, translation_camera, left)
+        depth_reconstructed, color = process_point_cloud(depth, intrinsic, rotation_camera, translation_camera, left)
         point_clouds.append(depth_reconstructed)
+        if left_file is not None:
+            colors.append(color)
 
-        if len(point_clouds) % 10 == 0:
-            visualize_point_cloud(point_clouds)
+        if len(point_clouds) % 20 == 0:
+            visualize_point_cloud(point_clouds, colors)
 
-    visualize_point_cloud(point_clouds)
+    visualize_point_cloud(point_clouds, colors)
 
     output_dir = os.path.dirname(args.depth) if os.path.isfile(args.depth) else args.depth
     output_file = os.path.join(output_dir, "world.pcl")
