@@ -151,8 +151,8 @@ def evaluate_depth_maps(ground_truth_dir, predicted_dir, rgb_dir, show, save_dir
         else:
             scale, shift = 1, 0
             pred_aligned = (pred / 65535.0 * 2000).astype(np.uint16) # max valid distance is 20m
+            gt = gt / 10 # to cm
 
-        gt = gt / 10 # to cm
         errs = compute_errors(gt, pred_aligned, mask)
         abs_diff_total += errs[0]
         abs_rel_total += errs[1]

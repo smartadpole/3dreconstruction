@@ -280,11 +280,11 @@ def scaling(left_image, right_image, depth, K, ICP):
     kp1_valid, kp2_valid = get_valid_point(kp1, kp2, matches)
 
     # points_3d = triangulate_points(kp1_valid, kp2_valid, K)
-    depth_stereo, mask = calc_depth(kp1_valid, kp2_valid, K)
+    depth_stereo, mask_match = calc_depth(kp1_valid, kp2_valid, K)
 
     valid_pred = get_valid_point_gt(depth, kp1_valid)
     valid_mask = (valid_pred > MIN) & (valid_pred < 65535)
-    mask = mask & valid_mask
+    mask = mask_match & valid_mask
 
     scale, shift = ICP.scaling(valid_pred, depth_stereo, mask=mask)
 
@@ -292,7 +292,10 @@ def scaling(left_image, right_image, depth, K, ICP):
 
     diff = np.abs(pred_aligned - depth_stereo) * mask
     diff /= (depth_stereo + 1e-6)
+    diff = diff[mask]
     diff_mean_points = np.mean(diff, axis = 0)
+
+    print("\nmask num: {} Scale: {:.2f}, Shift: {:.2f}".format(np.sum(mask_match), scale, shift))
     print("Mean diff:(points, depth image): {:.2f}".format(diff_mean_points))
 
     return scale, shift, diff_mean_points
@@ -312,29 +315,32 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K, ICP):
     scale, shift, diff_mean_points = scaling(left_image, right_image, depth, K, ICP)
     depth_scaled = ICP.align(depth, scale, shift)
 
+    depth_save = depth_scaled
     mask = (depth > MIN) & (depth < 65535) & (depth_scaled > MIN) & (depth_scaled < 65535)
-    depth_scaled[~mask] = 0
-    depth_scaled = depth2save(depth_scaled)
+    depth_save[~mask] = 0
+    depth_save = depth2save(depth_save)
 
-    return scale, shift, depth_scaled
+    return scale, shift, depth_save
 
     # ----------------------------------------------
     gt_file = file_left.replace('left', 'depth')
 
     depth_gt = cv2.imread(gt_file, cv2.IMREAD_UNCHANGED)
-    depth_gt = (depth_gt / 255.0  * 100 * 0.25).astype(np.float64) # to cm
+    depth_gt = (depth_gt / 10).astype(np.float64) # to cm
 
-    mask_gt = (depth_gt > MIN) & (depth_gt < 255)
+    mask_gt = (depth_gt > MIN) & (depth_gt < 500)
     mask_pred = (depth > MIN) & (depth < 65535)
-    mask = mask_gt & mask_pred
+    mask = mask_gt & mask_pred & mask
 
-    diff = np.abs(depth_scaled - depth_gt) * mask
+    diff = np.abs(depth_scaled - depth_gt)
     diff /= (depth_gt + 1e-6)
+    diff = diff[mask]
     diff_mean = np.mean(diff)
 
 
-    diff = np.abs(depth - depth_gt) * mask
+    diff = np.abs(depth - depth_gt)
     diff /= (depth_gt + 1e-6)
+    diff = diff[mask]
     diff_mean_origin = np.mean(diff)
 
     print("Mean diff:(points, depth image, origin depth): {:.2f}, {:.2f}, {:.2f}".format(diff_mean_points, diff_mean, diff_mean_origin))
@@ -346,7 +352,7 @@ def get_scale_by_feature_match(file_depth, file_left, file_right, K, ICP):
     # scale = compute_scaling_factor(depth, points_3d)
     # print(f"Scaling Factor: {scale}")
 
-    return scale, shift, depth_scaled
+    return scale, shift, depth_save
 
 def get_scale_by_lr_consistency(file, intrinsic):
     depth = cv2.imread(file, cv2.IMREAD_UNCHANGED)
@@ -392,7 +398,10 @@ def main():
 
         ICP = ScaleShiftAnalyzer()
 
-        for depth, left, right in tzip(*files):
+        for count, (depth, left, right) in enumerate(tzip(*files), start=1):
+            if count < 151:
+                continue
+
             intrinsic = config.set_by_config_yaml(left)
             scale, shift, depth_scaled = get_scale_by_feature_match(depth, left, right, intrinsic, ICP)
 
