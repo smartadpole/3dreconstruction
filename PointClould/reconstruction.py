@@ -24,7 +24,7 @@ from tqdm.contrib import tzip
 import yaml
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
-from PointClould.ICP import ICPRegistration
+from PointClould.ICP import ICPRegistration, array_to_pcd
 
 
 def GetArgs():
@@ -219,7 +219,16 @@ def get_images_and_depth(left_image_path, left_depth_path):
     left_depth = cv2.imread(left_depth_path, cv2.IMREAD_UNCHANGED)  # 假设深度图是单通道16位图像
     return left_image, left_depth
 
-# 点云融合处理
+def statistical_filter(pcd_o3d, nb_neighbors=20, std_ratio=2.0):
+    """
+    用统计滤波移除离群点，返回滤波后点云和被移除点索引。
+    """
+    if not isinstance(pcd_o3d, o3d.geometry.PointCloud):
+        pcd_o3d = array_to_pcd(pcd_o3d)
+    cl, index = pcd_o3d.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+
+    return cl, index
+
 def process_point_cloud(depth, K, left_image=None):
     depth = preprocess(depth)
 
@@ -230,7 +239,11 @@ def process_point_cloud(depth, K, left_image=None):
 
     point_cloud, colors = depth2point_cloud(depth, K, left_image)
 
-    return point_cloud, colors
+    pcd_filter, index = statistical_filter(point_cloud)
+    colors_filter = colors[index]
+    pcd_filter = point_cloud[index]
+
+    return pcd_filter, colors_filter
 
 # 使用位姿进行坐标变换
 def transform_point_cloud(point_cloud, rotation, translation):
