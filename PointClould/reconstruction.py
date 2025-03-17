@@ -24,14 +24,14 @@ from tqdm.contrib import tzip
 import yaml
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
-
+from PointClould.ICP import ICPRegistration
 
 
 def GetArgs():
     parser = argparse.ArgumentParser(description="",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--depth", type=str, required=True, help="depth image dir or file path or list of depth image files")
-    parser.add_argument("--pose", type=str, required=True, help="pose dir or file path or list of pose files")
+    parser.add_argument("--pose", type=str, help="pose dir or file path or list of pose files")
     parser.add_argument("--extrinsic", type=str, required=True, help="extrinsic pose file")
     parser.add_argument("--left", type=str, help="left image dir or file path or list of depth image files")
 
@@ -220,9 +220,8 @@ def get_images_and_depth(left_image_path, left_depth_path):
     return left_image, left_depth
 
 # 点云融合处理
-def process_point_cloud(depth, K, rotation, translation, left_image=None):
+def process_point_cloud(depth, K, left_image=None):
     depth = preprocess(depth)
-    points_3d = depth2point_cloud_matrix(depth, K)
 
     # 使用ICP进行点云对齐等操作
     # ICP = ScaleShiftAnalyzer()
@@ -230,9 +229,8 @@ def process_point_cloud(depth, K, rotation, translation, left_image=None):
     # points_3d_aligned = ICP.align(points_3d, scale, shift)
 
     point_cloud, colors = depth2point_cloud(depth, K, left_image)
-    point_cloud_transformed = transform_point_cloud(point_cloud, rotation, translation)
 
-    return point_cloud_transformed, colors
+    return point_cloud, colors
 
 # 使用位姿进行坐标变换
 def transform_point_cloud(point_cloud, rotation, translation):
@@ -258,7 +256,7 @@ def main():
     point_clouds = []
     colors = []
 
-    poses = load_pose(args.pose)
+    poses = load_pose(args.pose) if args.pose else None
     extrinsic = load_extrinsic(args.extrinsic)
 
     if not args.left:
@@ -269,22 +267,30 @@ def main():
 
     root_len = len(args.depth.rstrip('/'))
 
-    ICP = ScaleShiftAnalyzer()
+    ICP = ICPRegistration(max_corr_distance=10)
 
-    for depth_file, left_file in tzip(*files):
+    for idx, (depth_file, left_file) in enumerate(tzip(*files)):
         intrinsic = config.set_by_config_yaml(depth_file)
-        rotation, translation = get_pose(poses, depth_file)
+
+        depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
+        left = cv2.imread(left_file, cv2.IMREAD_UNCHANGED) if left_file else None
+        left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB) if left is not None else None
+        pcd, color = process_point_cloud(depth, intrinsic, left)
+
+        if poses:
+            rotation, translation = get_pose(poses, depth_file)
+        else:
+            current_world_pose = ICP.icp_registration(pcd)
+            rotation = current_world_pose[:3, :3]  # 3x3
+            translation = current_world_pose[:3, 3]  # 3x1
+
         if rotation is None:
             continue
         rotation_camera, translation_camera = get_camera_pose(rotation, translation, extrinsic['body_T_cam'][0])
 
+        pcd_transformed = transform_point_cloud(pcd, rotation_camera, translation_camera)
 
-        depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
-        left = cv2.imread(left_file, cv2.IMREAD_UNCHANGED) if left_file else None
-        left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
-
-        depth_reconstructed, color = process_point_cloud(depth, intrinsic, rotation_camera, translation_camera, left)
-        point_clouds.append(depth_reconstructed)
+        point_clouds.append(pcd_transformed)
         if left_file is not None:
             colors.append(color)
 
