@@ -41,6 +41,7 @@ def GetArgs():
 # 假设存在的配置
 MIN = 0
 VALID_DISTANCE = 300  # 7m
+RESOLUTION = 5  # cm
 
 
 def to_rotation(position, orientation):
@@ -239,11 +240,14 @@ def process_point_cloud(depth, K, left_image=None):
 
     point_cloud, colors = depth2point_cloud(depth, K, left_image)
 
-    pcd_filter, index = statistical_filter(point_cloud)
-    colors_filter = colors[index]
-    pcd_filter = point_cloud[index]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(point_cloud)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
 
-    return pcd_filter, colors_filter
+    pcd_filter, index = statistical_filter(pcd)
+    pcd_down = pcd_filter.voxel_down_sample(voxel_size=RESOLUTION)
+
+    return pcd_down
 
 # 使用位姿进行坐标变换
 def transform_point_cloud(point_cloud, rotation, translation):
@@ -251,14 +255,20 @@ def transform_point_cloud(point_cloud, rotation, translation):
     point_cloud_transformed = np.dot(point_cloud, rotation.T) + translation.T
     return point_cloud_transformed
 
-
-def visualize_point_cloud(points, colors):
+def visualize_pcd_by_color(points, colors):
     pcd = o3d.geometry.PointCloud()
     for i, cloud in enumerate(points):
         pcd.points.extend(o3d.utility.Vector3dVector(cloud))
         if len(colors) == len(points):
             pcd.colors.extend(o3d.utility.Vector3dVector(colors[i]))
 
+    o3d.visualization.draw_geometries([pcd])
+    return
+
+def visualize_pcd(points):
+    pcd = o3d.geometry.PointCloud()
+    for i, cloud in enumerate(points):
+        pcd += cloud
     o3d.visualization.draw_geometries([pcd])
     return
 
@@ -288,7 +298,7 @@ def main():
         depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
         left = cv2.imread(left_file, cv2.IMREAD_UNCHANGED) if left_file else None
         left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB) if left is not None else None
-        pcd, color = process_point_cloud(depth, intrinsic, left)
+        pcd = process_point_cloud(depth, intrinsic, left)
 
         if poses:
             rotation, translation = get_pose(poses, depth_file)
@@ -301,16 +311,16 @@ def main():
             continue
         rotation_camera, translation_camera = get_camera_pose(rotation, translation, extrinsic['body_T_cam'][0])
 
-        pcd_transformed = transform_point_cloud(pcd, rotation_camera, translation_camera)
+        pcd_transformed = transform_point_cloud(np.asarray(pcd.points), rotation_camera, translation_camera)
 
         point_clouds.append(pcd_transformed)
         if left_file is not None:
-            colors.append(color)
+            colors.append(np.asarray(pcd.colors))
 
         if len(point_clouds) % 10 == 0:
-            visualize_point_cloud(point_clouds, colors)
+            visualize_pcd_by_color(point_clouds, colors)
 
-    visualize_point_cloud(point_clouds, colors)
+    visualize_pcd_by_color(point_clouds, colors)
 
     output_dir = os.path.dirname(args.depth) if os.path.isfile(args.depth) else args.depth
     output_file = os.path.join(output_dir, "world.pcl")
