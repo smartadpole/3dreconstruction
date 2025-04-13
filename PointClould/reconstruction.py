@@ -25,6 +25,7 @@ import yaml
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 from PointClould.ICP import ICPRegistration, array_to_pcd
+from PointClould.OctoMap import OctoMap
 
 
 def GetArgs():
@@ -40,7 +41,7 @@ def GetArgs():
 
 # 假设存在的配置
 MIN = 0
-VALID_DISTANCE = 300  # 7m
+VALID_DISTANCE = 300  # m
 RESOLUTION = 5  # cm
 
 
@@ -220,6 +221,11 @@ def get_images_and_depth(left_image_path, left_depth_path):
     left_depth = cv2.imread(left_depth_path, cv2.IMREAD_UNCHANGED)  # 假设深度图是单通道16位图像
     return left_image, left_depth
 
+def radius_filter(pcd_o3d, radius=0.05, min_neighbors=5):
+    cl, index = pcd_o3d.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
+
+    return cl, index
+
 def statistical_filter(pcd_o3d, nb_neighbors=20, std_ratio=2.0):
     """
     用统计滤波移除离群点，返回滤波后点云和被移除点索引。
@@ -278,6 +284,8 @@ def main():
     config  = ConfigLoader()
     point_clouds = []
     colors = []
+    occupancy = []
+    colors_occ = []
 
     poses = load_pose(args.pose) if args.pose else None
     extrinsic = load_extrinsic(args.extrinsic)
@@ -290,40 +298,107 @@ def main():
 
     root_len = len(args.depth.rstrip('/'))
 
-    ICP = ICPRegistration(max_corr_distance=10)
+    # 初始化TSDF体积
+    volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=0.01,  # 更小的体素大小以提高精度
+        sdf_trunc=0.04,    # 更小的截断距离
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+    )
+
+    # 用于存储上一帧的位姿
+    last_pose = None
+    last_pcd = None
 
     for idx, (depth_file, left_file) in enumerate(tzip(*files)):
+        print(f"Processing frame {idx + 1}/{len(files[0])}")
+        
         intrinsic = config.set_by_config_yaml(depth_file)
-
+        
+        # 读取深度图和RGB图
         depth = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
-        left = cv2.imread(left_file, cv2.IMREAD_UNCHANGED) if left_file else None
-        left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB) if left is not None else None
-        pcd = process_point_cloud(depth, intrinsic, left)
+        left = cv2.imread(left_file, cv2.IMREAD_COLOR) if left_file else None
+        if left is not None:
+            left = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
+        
+        # 确保深度图和RGB图大小一致
+        if left is not None and depth.shape[:2] != left.shape[:2]:
+            depth = cv2.resize(depth, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_NEAREST)
 
+        # 预处理深度图
+        depth = preprocess(depth)
+        
+        # 创建RGBD图像
+        depth_o3d = o3d.geometry.Image(depth)
+        color_o3d = o3d.geometry.Image(left) if left is not None else None
+        
+        if color_o3d is not None:
+            rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                color_o3d, depth_o3d,
+                depth_scale=1000.0,  # 调整深度缩放因子
+                depth_trunc=3.0,     # 设置最大深度截断
+                convert_rgb_to_intensity=False
+            )
+        else:
+            rgbd_image = o3d.geometry.RGBDImage.create_from_depth_and_intensity(
+                depth_o3d,
+                depth_scale=1000.0,
+                depth_trunc=3.0
+            )
+
+        # 获取相机位姿
         if poses:
             rotation, translation = get_pose(poses, depth_file)
+            if rotation is None or translation is None:
+                print(f"Warning: No valid pose found for frame {idx}, skipping...")
+                continue
+            current_world_pose = np.eye(4)
+            current_world_pose[:3, :3] = rotation
+            current_world_pose[:3, 3] = translation
         else:
-            current_world_pose = ICP.icp_registration(pcd)
-            rotation = current_world_pose[:3, :3]  # 3x3
-            translation = current_world_pose[:3, 3]  # 3x1
+            # 如果没有提供位姿，使用ICP进行配准
+            if last_pcd is None:
+                last_pcd = process_point_cloud(depth, intrinsic, left)
+                last_pose = np.eye(4)
+                continue
+            
+            current_pcd = process_point_cloud(depth, intrinsic, left)
+            icp_result = o3d.pipelines.registration.registration_icp(
+                current_pcd, last_pcd, 0.02,
+                np.eye(4),
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+            )
+            current_world_pose = np.dot(last_pose, icp_result.transformation)
+            last_pcd = current_pcd
+            last_pose = current_world_pose
 
-        if rotation is None:
-            continue
-        rotation_camera, translation_camera = get_camera_pose(rotation, translation, extrinsic['body_T_cam'][0])
+        # 获取相机内参
+        intrinsics = o3d.camera.PinholeCameraIntrinsic(
+            width=depth.shape[1], height=depth.shape[0],
+            fx=intrinsic[0, 0], fy=intrinsic[1, 1],
+            cx=intrinsic[0, 2], cy=intrinsic[1, 2]
+        )
 
-        pcd_transformed = transform_point_cloud(np.asarray(pcd.points), rotation_camera, translation_camera)
+        # 将当前帧集成到TSDF体积中
+        volume.integrate(rgbd_image, intrinsics, current_world_pose)
 
-        point_clouds.append(pcd_transformed)
-        if left_file is not None:
-            colors.append(np.asarray(pcd.colors))
+        # 每处理一定数量的帧后显示中间结果
+        if (idx + 1) % 10 == 0:
+            mesh = volume.extract_triangle_mesh()
+            mesh.compute_vertex_normals()
+            o3d.visualization.draw_geometries([mesh])
 
-        if len(point_clouds) % 10 == 0:
-            visualize_pcd_by_color(point_clouds, colors)
-
-    visualize_pcd_by_color(point_clouds, colors)
-
+    # 提取最终的网格
+    mesh = volume.extract_triangle_mesh()
+    mesh.compute_vertex_normals()
+    
+    # 保存重建结果
     output_dir = os.path.dirname(args.depth) if os.path.isfile(args.depth) else args.depth
-    output_file = os.path.join(output_dir, "world.pcl")
+    output_file = os.path.join(output_dir, "reconstructed_mesh.ply")
+    o3d.io.write_triangle_mesh(output_file, mesh)
+    
+    # 显示最终结果
+    o3d.visualization.draw_geometries([mesh])
 
 
 if __name__ == '__main__':
