@@ -48,10 +48,10 @@ MAX_DEPTH = 20.0  # m
 VOXEL_SIZE = 0.02  # m
 ICP_THRESHOLD = 0.02  # m
 FILTER_RADIUS = 0.05  # m
-CONSTRAINT_THRESHOLD = 0.1  # 点云约束阈值(m)
+CONSTRAINT_THRESHOLD = 0.05  # 点云约束阈值(m)
 MIN_VALID_POINTS = 100  # 最小有效点数
 
-STEP_SHOW = 20  # 每10帧显示一次进度
+STEP_SHOW = 50  # 每10帧显示一次进度
 
 def to_rotation(position, orientation):
     """将位置和四元数转换为旋转矩阵和平移向量"""
@@ -221,23 +221,68 @@ def pre_filter_point_cloud(pcd, voxel_size=0.02):
     return pcd_downsampled
 
 
-def precise_icp_registration(source_pcd, target_pcd, initial_transform=np.eye(4), max_iterations=100):
-    """精确的ICP配准"""
-    # 1. 点对点ICP（粗配准）
-    icp_coarse = o3d.pipelines.registration.registration_icp(
-        source_pcd, target_pcd, ICP_THRESHOLD * 2, initial_transform,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iterations)
-    )
-    
-    # 2. 点对平面ICP（精配准）
-    icp_fine = o3d.pipelines.registration.registration_icp(
-        source_pcd, target_pcd, ICP_THRESHOLD, icp_coarse.transformation,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iterations)
-    )
-    
-    return icp_fine
+def perform_icp_registration(source_pcd, target_pcd, initial_transform=np.eye(4), 
+                           max_distance=0.1, max_iterations=50, 
+                           check_quality=True, context="配准"):
+    """
+    统一的ICP配准函数
+    Args:
+        source_pcd: 源点云
+        target_pcd: 目标点云
+        initial_transform: 初始变换矩阵
+        max_distance: 最大匹配距离
+        max_iterations: 最大迭代次数
+        check_quality: 是否检查配准质量
+        context: 上下文信息（用于日志）
+    Returns:
+        icp_result: ICP结果，异常时返回None
+        success: 是否成功
+    """
+    try:
+        # 确保点云有法向量
+        if not source_pcd.has_normals():
+            source_pcd.estimate_normals()
+        if not target_pcd.has_normals():
+            target_pcd.estimate_normals()
+        
+        # 执行ICP配准
+        icp_result = o3d.pipelines.registration.registration_icp(
+            source_pcd, target_pcd, max_distance,
+            initial_transform,
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iterations)
+        )
+        
+        if not check_quality:
+            return icp_result, True
+        
+        # 检查ICP结果是否异常
+        if icp_result is None:
+            print(f"警告：{context} ICP配准失败")
+            return None, False
+        
+        # 检查配准参数是否异常
+        if (icp_result.fitness < 0.1 or 
+            icp_result.inlier_rmse > 0.5 or 
+            np.isnan(icp_result.fitness) or 
+            np.isnan(icp_result.inlier_rmse)):
+            print(f"警告：{context} ICP配准异常，fitness: {icp_result.fitness}, rmse: {icp_result.inlier_rmse}")
+            return None, False
+        
+        # 检查变换矩阵是否异常
+        transformation = icp_result.transformation
+        if (np.any(np.isnan(transformation)) or 
+            np.any(np.isinf(transformation)) or
+            np.linalg.det(transformation[:3, :3]) < 0.1 or  # 检查旋转矩阵是否合理
+            np.linalg.norm(transformation[:3, 3]) > 10.0):  # 检查平移是否过大
+            print(f"警告：{context} ICP变换矩阵异常")
+            return None, False
+        
+        return icp_result, True
+        
+    except Exception as e:
+        print(f"警告：{context} ICP配准出现异常: {str(e)}")
+        return None, False
 
 
 def post_registration_filter(merged_pcd, radius=0.05, min_neighbors=10):
@@ -297,51 +342,62 @@ def constrain_current_frame_by_previous(current_pcd, previous_pcd, threshold=0.1
     if len(current_pcd.points) == 0 or len(previous_pcd.points) == 0:
         return current_pcd, 0.0, float('inf')
     
-    # 确保点云有法向量
-    if not current_pcd.has_normals():
-        current_pcd.estimate_normals()
-    if not previous_pcd.has_normals():
-        previous_pcd.estimate_normals()
-    
-    # 使用ICP计算从上一帧到当前帧的变换矩阵
-    icp_result = o3d.pipelines.registration.registration_icp(
-        previous_pcd, current_pcd, threshold * 2,  # 使用更大的搜索半径
-        np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
-    )
-    
-    # 变换上一帧点云到当前帧坐标系
-    previous_transformed = previous_pcd.transform(icp_result.transformation)
-    
-    # 计算当前帧每个点到变换后上一帧的距离
-    distances = current_pcd.compute_point_cloud_distance(previous_transformed)
-    distances = np.array(distances)
-    
-    # 找出误差小于阈值的点
-    valid_mask = distances < threshold
-    valid_indices = np.where(valid_mask)[0]
-    
-    if len(valid_indices) == 0:
-        return o3d.geometry.PointCloud(), 0.0, float('inf')
-    
-    # 提取有效点（保留当前帧中约束成功的点）
-    constrained_pcd = o3d.geometry.PointCloud()
-    constrained_pcd.points = o3d.utility.Vector3dVector(
-        np.asarray(current_pcd.points)[valid_indices]
-    )
-    
-    # 如果有颜色信息，也提取对应的颜色
-    if current_pcd.has_colors():
-        constrained_pcd.colors = o3d.utility.Vector3dVector(
-            np.asarray(current_pcd.colors)[valid_indices]
+    try:
+        # 使用统一的ICP配准函数
+        icp_result, success = perform_icp_registration(
+            previous_pcd, current_pcd,
+            max_distance=threshold * 2,
+            context="点云约束"
         )
-    
-    # 计算统计信息
-    valid_ratio = len(valid_indices) / len(distances)
-    mean_error = np.mean(distances[valid_mask])
-    
-    return constrained_pcd, valid_ratio, mean_error
+        
+        if not success:
+            return current_pcd, 0.0, float('inf')
+        
+        # 变换上一帧点云到当前帧坐标系
+        previous_transformed = previous_pcd.transform(icp_result.transformation)
+        
+        # 计算当前帧每个点到变换后上一帧的距离
+        distances = current_pcd.compute_point_cloud_distance(previous_transformed)
+        distances = np.array(distances)
+        
+        # 检查距离计算结果是否异常
+        if np.any(np.isnan(distances)) or np.any(np.isinf(distances)):
+            print(f"警告：距离计算异常")
+            return current_pcd, 0.0, float('inf')
+        
+        # 找出误差小于阈值的点
+        valid_mask = distances < threshold
+        valid_indices = np.where(valid_mask)[0]
+        
+        if len(valid_indices) == 0:
+            return o3d.geometry.PointCloud(), 0.0, float('inf')
+        
+        # 提取有效点（保留当前帧中约束成功的点）
+        constrained_pcd = o3d.geometry.PointCloud()
+        constrained_pcd.points = o3d.utility.Vector3dVector(
+            np.asarray(current_pcd.points)[valid_indices]
+        )
+        
+        # 如果有颜色信息，也提取对应的颜色
+        if current_pcd.has_colors():
+            constrained_pcd.colors = o3d.utility.Vector3dVector(
+                np.asarray(current_pcd.colors)[valid_indices]
+            )
+        
+        # 计算统计信息
+        valid_ratio = len(valid_indices) / len(distances)
+        mean_error = np.mean(distances[valid_mask])
+        
+        # 检查统计信息是否异常
+        if np.isnan(valid_ratio) or np.isnan(mean_error) or np.isinf(mean_error):
+            print(f"警告：统计信息异常，valid_ratio: {valid_ratio}, mean_error: {mean_error}")
+            return current_pcd, 0.0, float('inf')
+        
+        return constrained_pcd, valid_ratio, mean_error
+        
+    except Exception as e:
+        print(f"警告：点云约束出现异常: {str(e)}")
+        return current_pcd, 0.0, float('inf')
 
 
 def check_frame_quality(constrained_pcd, min_valid_points=100):
@@ -466,22 +522,45 @@ def main():
         else:
             # 使用ICP计算位姿
             if len(registered_point_clouds) > 0:
-                # 使用上一帧作为目标进行配准
-                target_pcd = registered_point_clouds[-1]
-                
-                # 精确ICP配准
-                icp_result = precise_icp_registration(
-                    current_pcd, target_pcd, 
-                    initial_transform=current_world_pose
-                )
-                
-                # 更新世界位姿
-                current_world_pose = np.dot(current_world_pose, icp_result.transformation)
-                
-                # 应用变换
-                current_pcd.transform(icp_result.transformation)
-                
-                print(f"ICP配准得分: {icp_result.fitness}")
+                try:
+                    # 使用上一帧作为目标进行配准
+                    target_pcd = registered_point_clouds[-1]
+                    
+                    # 精确ICP配准
+                    icp_result, success = perform_icp_registration(
+                        current_pcd, target_pcd, 
+                        initial_transform=current_world_pose,
+                        max_distance=ICP_THRESHOLD,
+                        context=f"第{idx + 1}帧位姿"
+                    )
+                    
+                    # 检查ICP结果是否异常
+                    if not success:
+                        print(f"警告：第 {idx + 1} 帧ICP配准失败，跳过")
+                        previous_pcd = current_pcd  # 更新上一帧
+                        continue
+                    
+                    # 检查配准质量
+                    if icp_result.fitness < 0.5 or icp_result.inlier_rmse > 0.1:
+                        print(f"警告：第 {idx + 1} 帧ICP配准质量差，fitness: {icp_result.fitness:.3f}, rmse: {icp_result.inlier_rmse:.3f}, 跳过")
+                        previous_pcd = current_pcd  # 更新上一帧
+                        continue
+                    
+                    # 更新世界位姿
+                    current_world_pose = np.dot(current_world_pose, icp_result.transformation)
+                    
+                    # 应用变换
+                    current_pcd.transform(icp_result.transformation)
+                    
+                    print(f"ICP配准成功，fitness: {icp_result.fitness:.3f}, rmse: {icp_result.inlier_rmse:.3f}")
+                    
+                except Exception as e:
+                    print(f"警告：第 {idx + 1} 帧ICP配准出现异常: {str(e)}, 跳过")
+                    previous_pcd = current_pcd  # 更新上一帧
+                    continue
+            else:
+                # 第一帧配准，使用单位矩阵
+                current_world_pose = np.eye(4)
         
         # 存储配准后的点云
         registered_point_clouds.append(current_pcd)
