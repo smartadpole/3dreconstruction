@@ -48,7 +48,6 @@ MAX_DEPTH = 20.0  # m
 VOXEL_SIZE = 0.02  # m
 ICP_THRESHOLD = 0.02  # m
 FILTER_RADIUS = 0.05  # m
-VALID_DISTANCE = 3  # m
 STEP_SHOW = 10  # 每10帧显示一次进度
 
 
@@ -148,14 +147,17 @@ def enhanced_preprocess(depth, kernel_size=5):
     else:
         depth_filtered = cv2.bilateralFilter(depth_filtered, 9, 75, 75)
     
-    # 3. 深度范围过滤
-    depth_filtered = (depth_filtered / 65535.0 * 2000).astype(np.uint16) # max valid distance is 20m
+    # 3. 根据深度图生成规则进行深度值转换
+    # 原始规则: depth[depth > MAX_DEPTH] = MAX_DEPTH
+    # depth_img_u16 = depth / MAX_DEPTH * 65535
+    # 反向转换: depth = depth_img_u16 / 65535 * MAX_DEPTH
+    depth_filtered = (depth_filtered / 65535.0 * MAX_DEPTH).astype(np.float32)
+    
+    # 4. 深度范围过滤
     valid_mask = (depth_filtered > MIN_DEPTH) & (depth_filtered < MAX_DEPTH)
     depth_filtered[~valid_mask] = 0
-
-    depth_filtered[depth_filtered > VALID_DISTANCE] = 0
     
-    # 4. 形态学操作去除小噪点
+    # 5. 形态学操作去除小噪点
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     depth_filtered = cv2.morphologyEx(depth_filtered, cv2.MORPH_OPEN, kernel)
     
@@ -176,7 +178,7 @@ def depth2point_cloud(depth, K, image=None):
     
     for v in range(height):
         for u in range(width):
-            Z = depth[v, u] # m
+            Z = depth[v, u]  # 已经是米为单位，经过enhanced_preprocess处理
             if Z <= 0 or Z < MIN_DEPTH or Z > MAX_DEPTH:
                 continue
             
@@ -311,7 +313,10 @@ def main():
             registered_point_clouds = [filtered_pcd]
 
             if len(filtered_pcd.points) > 0:
-                o3d.visualization.draw_geometries(registered_point_clouds)
+                print(f"显示当前合并点云，点数: {len(filtered_pcd.points)}")
+                o3d.visualization.draw_geometries([filtered_pcd])
+            else:
+                print("当前合并点云为空，不显示")
         
         # 获取相机内参
         intrinsic = config.set_by_config_yaml(depth_file)
