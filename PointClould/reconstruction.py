@@ -48,8 +48,10 @@ MAX_DEPTH = 20.0  # m
 VOXEL_SIZE = 0.02  # m
 ICP_THRESHOLD = 0.02  # m
 FILTER_RADIUS = 0.05  # m
-STEP_SHOW = 10  # 每10帧显示一次进度
+CONSTRAINT_THRESHOLD = 0.1  # 点云约束阈值(m)
+MIN_VALID_POINTS = 100  # 最小有效点数
 
+STEP_SHOW = 20  # 每10帧显示一次进度
 
 def to_rotation(position, orientation):
     """将位置和四元数转换为旋转矩阵和平移向量"""
@@ -275,6 +277,87 @@ def process_frame(depth, K, left_image=None):
     return pcd_processed
 
 
+def constrain_current_frame_by_previous(current_pcd, previous_pcd, threshold=0.1):
+    """
+    以当前帧为基准，用上一帧来约束当前帧点云
+    Args:
+        current_pcd: 当前帧点云（基准）
+        previous_pcd: 上一帧点云（约束）
+        threshold: 约束阈值
+    Returns:
+        constrained_pcd: 约束后的点云
+        valid_ratio: 有效点比例
+        mean_error: 平均误差
+    """
+    if not isinstance(current_pcd, o3d.geometry.PointCloud):
+        current_pcd = create_point_cloud(current_pcd)
+    if not isinstance(previous_pcd, o3d.geometry.PointCloud):
+        previous_pcd = create_point_cloud(previous_pcd)
+    
+    if len(current_pcd.points) == 0 or len(previous_pcd.points) == 0:
+        return current_pcd, 0.0, float('inf')
+    
+    # 确保点云有法向量
+    if not current_pcd.has_normals():
+        current_pcd.estimate_normals()
+    if not previous_pcd.has_normals():
+        previous_pcd.estimate_normals()
+    
+    # 使用ICP计算从上一帧到当前帧的变换矩阵
+    icp_result = o3d.pipelines.registration.registration_icp(
+        previous_pcd, current_pcd, threshold * 2,  # 使用更大的搜索半径
+        np.eye(4),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+    )
+    
+    # 变换上一帧点云到当前帧坐标系
+    previous_transformed = previous_pcd.transform(icp_result.transformation)
+    
+    # 计算当前帧每个点到变换后上一帧的距离
+    distances = current_pcd.compute_point_cloud_distance(previous_transformed)
+    distances = np.array(distances)
+    
+    # 找出误差小于阈值的点
+    valid_mask = distances < threshold
+    valid_indices = np.where(valid_mask)[0]
+    
+    if len(valid_indices) == 0:
+        return o3d.geometry.PointCloud(), 0.0, float('inf')
+    
+    # 提取有效点（保留当前帧中约束成功的点）
+    constrained_pcd = o3d.geometry.PointCloud()
+    constrained_pcd.points = o3d.utility.Vector3dVector(
+        np.asarray(current_pcd.points)[valid_indices]
+    )
+    
+    # 如果有颜色信息，也提取对应的颜色
+    if current_pcd.has_colors():
+        constrained_pcd.colors = o3d.utility.Vector3dVector(
+            np.asarray(current_pcd.colors)[valid_indices]
+        )
+    
+    # 计算统计信息
+    valid_ratio = len(valid_indices) / len(distances)
+    mean_error = np.mean(distances[valid_mask])
+    
+    return constrained_pcd, valid_ratio, mean_error
+
+
+def check_frame_quality(constrained_pcd, min_valid_points=100):
+    """
+    检查约束后点云的质量
+    Args:
+        constrained_pcd: 约束后的点云
+        min_valid_points: 最小有效点数
+    Returns:
+        is_good: 是否质量良好
+    """
+    if len(constrained_pcd.points) < min_valid_points:
+        return False
+    return True
+
+
 def main():
     args = GetArgs()
     config = ConfigLoader()
@@ -298,13 +381,13 @@ def main():
     # 存储配准后的点云
     registered_point_clouds = []
     current_world_pose = np.eye(4)
+    previous_pcd = None  # 上一帧点云
+    frame_count = 0  # 帧计数器
     
     for idx, (depth_file, left_file) in enumerate(tzip(*files)):
         print(f"处理第 {idx + 1}/{len(files[0])} 帧")
 
         if (idx + 1) % STEP_SHOW == 0 and len(registered_point_clouds) > 1:
-            print(f"进行中间滤波，当前点云数量: {len(registered_point_clouds)}")
-
             merged_pcd = o3d.geometry.PointCloud()
             for pcd in registered_point_clouds:
                 merged_pcd += pcd
@@ -313,11 +396,8 @@ def main():
             registered_point_clouds = [filtered_pcd]
 
             if len(filtered_pcd.points) > 0:
-                print(f"显示当前合并点云，点数: {len(filtered_pcd.points)}")
                 o3d.visualization.draw_geometries([filtered_pcd])
-            else:
-                print("当前合并点云为空，不显示")
-        
+
         # 获取相机内参
         intrinsic = config.set_by_config_yaml(depth_file)
         
@@ -341,11 +421,35 @@ def main():
             print(f"警告：第 {idx + 1} 帧点云为空，跳过")
             continue
         
+        # 第一帧舍弃，从第二帧开始处理
+        if previous_pcd is None:
+            print(f"第 {idx + 1} 帧作为参考帧，不进行融合")
+            previous_pcd = current_pcd  # 保存为上一帧
+            continue
+        
+        # 从第二帧开始进行点云约束
+        frame_count += 1
+        constrained_pcd, valid_ratio, mean_error = constrain_current_frame_by_previous(
+            current_pcd, previous_pcd, CONSTRAINT_THRESHOLD
+        )
+
+        is_good_quality = check_frame_quality(constrained_pcd, MIN_VALID_POINTS)
+        
+        if not is_good_quality:
+            print(f"警告：第 {idx + 1} 帧约束后质量差，有效点比例: {valid_ratio:.3f}, 平均误差: {mean_error:.3f}m, 跳过")
+            previous_pcd = current_pcd  # 更新上一帧
+            continue
+        
+        print(f"第 {idx + 1} 帧约束成功，有效点比例: {valid_ratio:.3f}, 平均误差: {mean_error:.3f}m")
+        current_pcd = constrained_pcd
+        
         # 获取位姿并进行配准
         if poses:
+            # 使用给定的位姿
             rotation, translation = get_pose(poses, depth_file)
             if rotation is None or translation is None:
                 print(f" Warning: No pose found, skipping...")
+                previous_pcd = current_pcd  # 更新上一帧
                 continue
             
             # 应用外参变换
@@ -360,7 +464,7 @@ def main():
             current_pcd.transform(camera_pose)
             current_world_pose = camera_pose
         else:
-            # 如果没有提供位姿，使用ICP进行配准
+            # 使用ICP计算位姿
             if len(registered_point_clouds) > 0:
                 # 使用上一帧作为目标进行配准
                 target_pcd = registered_point_clouds[-1]
@@ -378,9 +482,10 @@ def main():
                 current_pcd.transform(icp_result.transformation)
                 
                 print(f"ICP配准得分: {icp_result.fitness}")
-
+        
+        # 存储配准后的点云
         registered_point_clouds.append(current_pcd)
-
+        previous_pcd = current_pcd  # 更新上一帧点云
     
     # 最终合并和滤波
     print("进行最终点云合并和滤波...")
